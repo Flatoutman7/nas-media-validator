@@ -3,3 +3,8 @@ __pycache__/
 *.log
 bad_media_report.csv
 arr_config.json
+*.spec
+build/
+dist/
+warn-*.txt
+xref-*.html

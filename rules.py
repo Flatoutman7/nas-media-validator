@@ -17,9 +17,15 @@ def get_media_info(file):
     """Return ffprobe stream metadata for a media file as parsed JSON."""
 
     cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", file]
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
     result = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore"
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        creationflags=creationflags,
     )
 
     return json.loads(result.stdout)
