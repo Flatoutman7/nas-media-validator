@@ -5,7 +5,10 @@ import os
 import subprocess
 
 from autofix import build_ffmpeg_command
+from arr_config import load_arr_config
 from rules import analyze_file
+from sonarr_client import SonarrClient
+from radarr_client import RadarrClient
 
 
 class ScanWorker(QThread):
@@ -58,16 +61,16 @@ class AutoFixWorker(QThread):
         self.issues_by_input = issues_by_input or {}
 
     def run(self):
-        outputs = []
-
         for input_path in self.inputs:
             issues = self.issues_by_input.get(input_path)
             if issues is None:
                 # For folder mode, we re-analyze the file so the fix matches.
                 issues, _stats = analyze_file(input_path)
 
-            cmd, output_path = build_ffmpeg_command(input_path, issues)
-            outputs.append(output_path)
+            cmd, temp_output_path = build_ffmpeg_command(input_path, issues)
+            if cmd is None or temp_output_path is None:
+                self.log.emit(f"Auto-fix: skipping (meets criteria): {input_path}")
+                continue
 
             self.log.emit(f"Auto-fix: {input_path}")
             self.log.emit("FFmpeg command:")
@@ -88,6 +91,113 @@ class AutoFixWorker(QThread):
             if proc.returncode != 0:
                 self.log.emit(f"Auto-fix failed (exit {proc.returncode}).")
             else:
-                self.log.emit(f"Auto-fix complete: {output_path}")
+                # Failsafe: if the generated output has no audio, do not
+                # overwrite the original. This prevents "lost audio" cases.
+                try:
+                    _issues_out, stats_out = analyze_file(temp_output_path)
+                    audio_found = bool(stats_out.get("audio_found"))
+                except Exception:
+                    # If we can't verify the output, do not overwrite the original.
+                    audio_found = False
 
-        self.finished.emit("\n".join(outputs))
+                if not audio_found:
+                    self.log.emit(
+                        "Auto-fix skipped overwrite: output has no audio (failsafe)."
+                    )
+                    try:
+                        os.remove(temp_output_path)
+                    except Exception:
+                        pass
+                else:
+                    # Overwrite the original file only when ffmpeg succeeded
+                    # AND the output still contains audio.
+                    os.replace(temp_output_path, input_path)
+                    self.log.emit(f"Auto-fix complete (replaced): {input_path}")
+
+        self.finished.emit("Auto-fix finished.")
+
+
+class SonarrRedownloadWorker(QThread):
+    log = Signal(str)
+    finished = Signal(str)
+
+    def __init__(self, series_term: str):
+        super().__init__()
+        self.series_term = series_term
+
+    def run(self):
+        cfg = load_arr_config()
+        sonarr_cfg = (cfg or {}).get("sonarr") if cfg else None
+        if not sonarr_cfg:
+            self.log.emit(
+                "Sonarr not configured. Create `arr_config.json` with a `sonarr` object."
+            )
+            self.finished.emit("Sonarr missing config.")
+            return
+
+        base_url = sonarr_cfg.get("base_url")
+        api_key = sonarr_cfg.get("api_key")
+        if not base_url or not api_key:
+            self.log.emit(
+                "Sonarr config incomplete. `base_url` and `api_key` are required."
+            )
+            self.finished.emit("Sonarr config incomplete.")
+            return
+
+        client = SonarrClient(base_url=base_url, api_key=api_key)
+        self.log.emit(f"Sonarr: looking up series for '{self.series_term}'...")
+        series_id = client.find_series_id(self.series_term)
+        if not series_id:
+            self.log.emit("Sonarr: could not find a matching series ID.")
+            self.finished.emit("No matching series.")
+            return
+
+        self.log.emit(
+            f"Sonarr: triggering MissingEpisodeSearch (seriesId={series_id})..."
+        )
+        resp = client.missing_episode_search(series_id)
+        self.log.emit(f"Sonarr response: {resp}")
+        self.finished.emit("Sonarr redownload triggered.")
+
+
+class RadarrRedownloadWorker(QThread):
+    log = Signal(str)
+    finished = Signal(str)
+
+    def __init__(self, movie_term: str):
+        super().__init__()
+        self.movie_term = movie_term
+
+    def run(self):
+        cfg = load_arr_config()
+        radarr_cfg = (cfg or {}).get("radarr") if cfg else None
+        if not radarr_cfg:
+            self.log.emit(
+                "Radarr not configured. Create `arr_config.json` with a `radarr` object."
+            )
+            self.finished.emit("Radarr missing config.")
+            return
+
+        base_url = radarr_cfg.get("base_url")
+        api_key = radarr_cfg.get("api_key")
+        if not base_url or not api_key:
+            self.log.emit(
+                "Radarr config incomplete. `base_url` and `api_key` are required."
+            )
+            self.finished.emit("Radarr config incomplete.")
+            return
+
+        client = RadarrClient(base_url=base_url, api_key=api_key)
+        self.log.emit(f"Radarr: looking up movie for '{self.movie_term}'...")
+        movie_id = client.find_movie_id(self.movie_term)
+        if not movie_id:
+            self.log.emit("Radarr: could not find a matching movie ID.")
+            self.finished.emit("No matching movie.")
+            return
+
+        self.log.emit(
+            f"Radarr: triggering missing movie search (movieId={movie_id})..."
+        )
+        resp = client.missing_movie_search(movie_id)
+        self.log.emit(f"Radarr response: {resp}")
+        self.finished.emit("Radarr redownload triggered.")
