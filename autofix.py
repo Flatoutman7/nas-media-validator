@@ -32,18 +32,14 @@ def _unique_output_path(output_path: str) -> str:
     return output_path
 
 
-def _split_issues(issues_text: str):
-    # In your GUI you build issues as a comma-separated list.
-    # Split on commas and trim.
-    return [s.strip() for s in issues_text.split(",") if s.strip()]
-
-
-def build_ffmpeg_command(input_path: str, issues: Iterable[str] | str | None):
+def build_ffmpeg_command(
+    input_path: str, issues: Iterable[str] | str | None
+) -> tuple[list[str], str] | tuple[None, None]:
     """
-    Build an ffmpeg command to "fix" a file based on detected issues.
+    Build an ffmpeg command to fix a file based on detected issues.
 
-    This does NOT delete/overwrite the original; it writes a sibling output
-    file with `_auto_fixed.mp4` (or `_auto_fixed_<n>.mp4` if needed).
+    Returns `(cmd, temp_output_path)` or `(None, None)` when the file already
+    meets the supported fix criteria.
     """
 
     if isinstance(issues, str):
@@ -54,11 +50,19 @@ def build_ffmpeg_command(input_path: str, issues: Iterable[str] | str | None):
     input_path_norm = os.path.normpath(input_path)
     folder = os.path.dirname(input_path_norm)
     base = os.path.splitext(os.path.basename(input_path_norm))[0]
-    output_path = _unique_output_path(os.path.join(folder, f"{base}_auto_fixed.mp4"))
+    input_ext = os.path.splitext(input_path_norm)[1].lower() or ".mp4"
+
+    wants_mp4_container = "container is not mp4" in issues_text
+    target_ext = ".mp4" if wants_mp4_container else input_ext
+
+    temp_output_path = _unique_output_path(
+        os.path.join(folder, f"{base}_auto_fix_tmp{target_ext}")
+    )
 
     needs_hevc = "not hevc" in issues_text or "10bit h.264" in issues_text
     needs_aac = "not aac" in issues_text
 
+    # Subtitles: if anything indicates subtitles are "bad", we remove them.
     remove_subtitles = any(
         s in issues_text
         for s in (
@@ -70,6 +74,19 @@ def build_ffmpeg_command(input_path: str, issues: Iterable[str] | str | None):
     )
 
     expected_height = _parse_expected_height_from_wrong_resolution(issues_text)
+
+    # Only fix when we can confidently improve based on supported issue types.
+    should_fix = any(
+        [
+            needs_hevc,
+            needs_aac,
+            remove_subtitles,
+            expected_height is not None,
+            wants_mp4_container,
+        ]
+    )
+    if not should_fix:
+        return None, None
 
     # Video codec selection
     if needs_hevc:
@@ -91,7 +108,11 @@ def build_ffmpeg_command(input_path: str, issues: Iterable[str] | str | None):
         # Scale keeping aspect ratio; -2 forces even width.
         filter_args = ["-vf", f"scale=-2:{expected_height}"]
 
-    # Map video+first audio, drop subtitles if requested.
+    # If there are multiple tracks, keep Plex-friendlier "first stream only".
+    multiple_audio_issue = "multiple audio tracks detected" in issues_text
+    multiple_subtitle_issue = "multiple subtitle tracks detected" in issues_text
+
+    # Map video+audio, optionally subtitles.
     # -map 0:a:0? makes audio optional.
     cmd = [
         "ffmpeg",
@@ -101,21 +122,38 @@ def build_ffmpeg_command(input_path: str, issues: Iterable[str] | str | None):
         input_path_norm,
         "-map",
         "0:v:0",
-        "-map",
-        "0:a:0?",
     ]
 
+    # Audio mapping
+    if multiple_audio_issue:
+        cmd += ["-map", "0:a:0?"]
+    else:
+        cmd += ["-map", "0:a?"]
+
+    # Subtitle mapping / removal
     if remove_subtitles:
         cmd.append("-sn")
+    else:
+        if multiple_subtitle_issue:
+            cmd += ["-map", "0:s:0?"]
+        else:
+            cmd += ["-map", "0:s?"]
+        # Copy subtitles verbatim when we are not removing them.
+        cmd += ["-c:s", "copy"]
 
     if filter_args:
         cmd += filter_args
 
     cmd += video_codec_args
     cmd += audio_codec_args
-    cmd += ["-movflags", "+faststart", output_path]
 
-    return cmd, output_path
+    # Container/muxer selection.
+    if wants_mp4_container:
+        cmd += ["-f", "mp4", "-movflags", "+faststart"]
+
+    cmd += [temp_output_path]
+
+    return cmd, temp_output_path
 
 
 def run_ffmpeg(cmd: list[str]):

@@ -58,16 +58,16 @@ class AutoFixWorker(QThread):
         self.issues_by_input = issues_by_input or {}
 
     def run(self):
-        outputs = []
-
         for input_path in self.inputs:
             issues = self.issues_by_input.get(input_path)
             if issues is None:
                 # For folder mode, we re-analyze the file so the fix matches.
                 issues, _stats = analyze_file(input_path)
 
-            cmd, output_path = build_ffmpeg_command(input_path, issues)
-            outputs.append(output_path)
+            cmd, temp_output_path = build_ffmpeg_command(input_path, issues)
+            if cmd is None or temp_output_path is None:
+                self.log.emit(f"Auto-fix: skipping (meets criteria): {input_path}")
+                continue
 
             self.log.emit(f"Auto-fix: {input_path}")
             self.log.emit("FFmpeg command:")
@@ -88,6 +88,8 @@ class AutoFixWorker(QThread):
             if proc.returncode != 0:
                 self.log.emit(f"Auto-fix failed (exit {proc.returncode}).")
             else:
-                self.log.emit(f"Auto-fix complete: {output_path}")
+                # Overwrite the original file only when ffmpeg succeeded.
+                os.replace(temp_output_path, input_path)
+                self.log.emit(f"Auto-fix complete (replaced): {input_path}")
 
-        self.finished.emit("\n".join(outputs))
+        self.finished.emit("Auto-fix finished.")
