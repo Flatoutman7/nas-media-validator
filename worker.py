@@ -5,7 +5,9 @@ import os
 import subprocess
 
 from autofix import build_ffmpeg_command
+from arr_config import load_arr_config
 from rules import analyze_file
+from sonarr_client import SonarrClient
 
 
 class ScanWorker(QThread):
@@ -112,3 +114,46 @@ class AutoFixWorker(QThread):
                     self.log.emit(f"Auto-fix complete (replaced): {input_path}")
 
         self.finished.emit("Auto-fix finished.")
+
+
+class SonarrRedownloadWorker(QThread):
+    log = Signal(str)
+    finished = Signal(str)
+
+    def __init__(self, series_term: str):
+        super().__init__()
+        self.series_term = series_term
+
+    def run(self):
+        cfg = load_arr_config()
+        sonarr_cfg = (cfg or {}).get("sonarr") if cfg else None
+        if not sonarr_cfg:
+            self.log.emit(
+                "Sonarr not configured. Create `arr_config.json` with a `sonarr` object."
+            )
+            self.finished.emit("Sonarr missing config.")
+            return
+
+        base_url = sonarr_cfg.get("base_url")
+        api_key = sonarr_cfg.get("api_key")
+        if not base_url or not api_key:
+            self.log.emit(
+                "Sonarr config incomplete. `base_url` and `api_key` are required."
+            )
+            self.finished.emit("Sonarr config incomplete.")
+            return
+
+        client = SonarrClient(base_url=base_url, api_key=api_key)
+        self.log.emit(f"Sonarr: looking up series for '{self.series_term}'...")
+        series_id = client.find_series_id(self.series_term)
+        if not series_id:
+            self.log.emit("Sonarr: could not find a matching series ID.")
+            self.finished.emit("No matching series.")
+            return
+
+        self.log.emit(
+            f"Sonarr: triggering MissingEpisodeSearch (seriesId={series_id})..."
+        )
+        resp = client.missing_episode_search(series_id)
+        self.log.emit(f"Sonarr response: {resp}")
+        self.finished.emit("Sonarr redownload triggered.")

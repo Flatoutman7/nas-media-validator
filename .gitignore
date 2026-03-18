@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 *.log
 bad_media_report.csv
+arr_config.json

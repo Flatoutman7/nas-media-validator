@@ -22,7 +22,7 @@ import subprocess
 import os
 import re
 
-from worker import AutoFixWorker, ScanWorker
+from worker import AutoFixWorker, ScanWorker, SonarrRedownloadWorker
 
 
 class MainWindow(QWidget):
@@ -34,6 +34,7 @@ class MainWindow(QWidget):
         self.resume_after = None
         self.library_stats_total = None
         self.auto_fix_worker = None
+        self.sonarr_redownload_worker = None
 
         self.setWindowTitle("NAS Media Validator")
 
@@ -322,11 +323,13 @@ class MainWindow(QWidget):
         open_folder_action = QAction("Open Folder", self)
         auto_fix_file_action = QAction("Auto Fix File", self)
         auto_fix_folder_action = QAction("Auto Fix Folder", self)
+        redownload_sonarr_action = QAction("Redownload Missing (Sonarr)", self)
         copy_action = QAction("Copy Path", self)
         open_action.triggered.connect(self.open_file_location)
         open_folder_action.triggered.connect(self.open_folder_location)
         auto_fix_file_action.triggered.connect(self.auto_fix_file)
         auto_fix_folder_action.triggered.connect(self.auto_fix_folder)
+        redownload_sonarr_action.triggered.connect(self.redownload_missing_sonarr)
         copy_action.triggered.connect(self.copy_file_path)
 
         play_action = QAction("Play File", self)
@@ -337,6 +340,7 @@ class MainWindow(QWidget):
         menu.addAction(open_folder_action)
         menu.addAction(auto_fix_file_action)
         menu.addAction(auto_fix_folder_action)
+        menu.addAction(redownload_sonarr_action)
         menu.addAction(copy_action)
         menu.addAction(play_action)
 
@@ -427,6 +431,54 @@ class MainWindow(QWidget):
         self.auto_fix_worker.log.connect(self.add_log)
         self.auto_fix_worker.finished.connect(self.auto_fix_finished)
         self.auto_fix_worker.start()
+
+    def redownload_missing_sonarr(self):
+        """
+        Ask Sonarr to search for missing episodes for the selected series.
+
+        This is a "request download again" action, not an in-place repair.
+        """
+
+        input_path, issues_text = self._selected_file_and_issues()
+        if not input_path:
+            return
+
+        issues_lower = (issues_text or "").lower()
+
+        missing_audio = "no audio stream found" in issues_lower
+        missing_video = "no video stream found" in issues_lower
+        if not (missing_audio or missing_video):
+            self.output.append(
+                "Redownload via Sonarr: selected row does not indicate missing audio/video."
+            )
+            return
+
+        # Sonarr handles TV episodes, so we only run this for SxxEyy-like names.
+        base = os.path.basename(input_path)
+        if not re.search(r"\bS\d{1,2}E\d{1,2}\b", base, flags=re.IGNORECASE):
+            self.output.append(
+                "Redownload via Sonarr: not detected as a TV episode name (use Radarr for movies)."
+            )
+            return
+
+        series_term = self.extract_media_title(input_path)
+        if not series_term:
+            self.output.append(
+                "Redownload via Sonarr: could not extract a series name."
+            )
+            return
+
+        if self.sonarr_redownload_worker and self.sonarr_redownload_worker.isRunning():
+            self.output.append("Sonarr redownload already running.")
+            return
+
+        self.output.append(f"Sonarr: redownload requested for '{series_term}'")
+        self.sonarr_redownload_worker = SonarrRedownloadWorker(series_term)
+        self.sonarr_redownload_worker.log.connect(self.add_log)
+        self.sonarr_redownload_worker.finished.connect(
+            lambda msg: self.output.append(f"Sonarr: {msg}")
+        )
+        self.sonarr_redownload_worker.start()
 
     def auto_fix_finished(self, outputs_text: str):
         """Report auto-fix output paths when the ffmpeg worker is done."""
