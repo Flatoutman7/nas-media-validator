@@ -1,20 +1,25 @@
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QPushButton,
     QTextEdit,
     QLabel,
     QProgressBar,
+    QLineEdit,
     QTableWidget,
     QTableWidgetItem,
     QMenu,
     QApplication,
+    QListWidget,
+    QListWidgetItem,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 
 import subprocess
 import os
+import re
 
 from worker import ScanWorker
 
@@ -36,6 +41,10 @@ class MainWindow(QWidget):
         self.start_button = QPushButton("Scan NAS")
         self.start_button.clicked.connect(self.start_scan)
 
+        self.new_scan_button = QPushButton("New Scan")
+        self.new_scan_button.clicked.connect(self.start_fresh_scan)
+        self.new_scan_button.setEnabled(True)
+
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_scan)
@@ -48,6 +57,47 @@ class MainWindow(QWidget):
         self.output.setReadOnly(True)
 
         # --- Issue Table ---
+        self.issue_filter = QLineEdit()
+        self.issue_filter.setPlaceholderText("Filter issues (file or issue text)...")
+        self.issue_filter.setClearButtonEnabled(True)
+        self.issue_filter.textChanged.connect(self.apply_issue_filter)
+
+        self.issue_type_filter_list = QListWidget()
+        self.issue_type_filter_list.setFixedHeight(110)
+        self.issue_type_filter_list_label = QLabel("Issue type:")
+        self.issue_type_filter_map = {
+            # NOTE: input `t` is already lowercase in `apply_issue_filter()`.
+            "file_small": lambda t: "file suspiciously small" in t,
+            "container": lambda t: "container is not mp4" in t,
+            "media_info_error": lambda t: "could not read media info" in t,
+            "video_codec": lambda t: "video codec is" in t and "not hevc" in t,
+            "audio_codec": lambda t: "audio codec is" in t and "not aac" in t,
+            "subtitles": lambda t: "subtitle track detected" in t,
+            "no_video": lambda t: "no video stream found" in t,
+            "no_audio": lambda t: "no audio stream found" in t,
+        }
+        self.issue_type_items = [
+            ("File too small", "file_small"),
+            ("Container (not MP4)", "container"),
+            ("Media info error", "media_info_error"),
+            ("Video codec (not HEVC)", "video_codec"),
+            ("Audio codec (not AAC)", "audio_codec"),
+            ("Subtitles detected", "subtitles"),
+            ("Missing video", "no_video"),
+            ("Missing audio", "no_audio"),
+        ]
+
+        for label, issue_id in self.issue_type_items:
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setData(Qt.UserRole, issue_id)
+            self.issue_type_filter_list.addItem(item)
+
+        self.issue_type_filter_list.itemChanged.connect(
+            lambda _item: self.apply_issue_filter(self.issue_filter.text())
+        )
+
         self.table = QTableWidget()
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["File", "Issue"])
@@ -60,22 +110,35 @@ class MainWindow(QWidget):
 
         layout.addWidget(self.label)
         layout.addWidget(self.start_button)
+        layout.addWidget(self.new_scan_button)
         layout.addWidget(self.stop_button)
         layout.addWidget(self.progress)
         layout.addWidget(self.stats)
         layout.addWidget(self.output)
+        layout.addWidget(self.issue_filter)
+        layout.addWidget(self.issue_type_filter_list_label)
+        layout.addWidget(self.issue_type_filter_list)
         layout.addWidget(self.table)
 
         self.setLayout(layout)
 
     def add_issue(self, file, issue):
+        file_key = self.canonicalize_path(file)
+        file_disp = os.path.normpath(file) if file else file
 
         # check if this file already exists in the table
         for row in range(self.table.rowCount()):
 
             existing_file_item = self.table.item(row, 0)
 
-            if existing_file_item and existing_file_item.text() == file:
+            if not existing_file_item:
+                continue
+
+            # Always recompute from the visible text for stability across runs.
+            # (Some rows might have a cached key created by an older normalization.)
+            existing_key = self.canonicalize_path(existing_file_item.text())
+
+            if existing_key == file_key:
 
                 issue_item = self.table.item(row, 1)
 
@@ -91,7 +154,8 @@ class MainWindow(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
 
-        file_item = QTableWidgetItem(file)
+        file_item = QTableWidgetItem(file_disp)
+        file_item.setData(Qt.UserRole, file_key)
         issue_item = QTableWidgetItem(issue)
 
         self.table.setItem(row, 0, file_item)
@@ -102,6 +166,20 @@ class MainWindow(QWidget):
         issue_item.setBackground(Qt.darkRed)
 
         self.table.scrollToBottom()
+        self.apply_issue_filter(self.issue_filter.text())
+
+    def canonicalize_path(self, file_path):
+        """Return a stable key for comparing file paths across runs."""
+
+        if not file_path:
+            return ""
+
+        # On Windows, `os.path.normcase()` only normalizes slashes and the drive
+        # letter, but directory/file name casing can still differ across scans.
+        # Use a full-casefolded normalized path so the same physical file stacks.
+        normalized = os.path.normpath(file_path).strip()
+        normalized = normalized.replace("/", "\\")
+        return normalized.casefold()
 
     def open_folder_location(self):
         """Open Windows Explorer at the selected file's folder."""
@@ -147,6 +225,7 @@ class MainWindow(QWidget):
             return
 
         self.start_button.setEnabled(False)
+        self.new_scan_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         is_resume = self.resume_after is not None
         if not is_resume:
@@ -167,12 +246,20 @@ class MainWindow(QWidget):
 
         self.worker.start()
 
+    def start_fresh_scan(self):
+        """Clear results and start a new scan from the beginning."""
+        self.resume_after = None
+        self.output.clear()
+        self.table.setRowCount(0)
+        self.start_scan()
+
     def stop_scan(self):
         """Request the current scan to stop early and update buttons."""
         if self.worker:
             self.worker.request_stop()
         self.stop_button.setEnabled(False)
         self.start_button.setEnabled(True)
+        self.new_scan_button.setEnabled(True)
         self.label.setText("Stopping...")
 
     def show_context_menu(self, position):
@@ -222,6 +309,71 @@ class MainWindow(QWidget):
 
         os.startfile(file_item.text())
 
+    def apply_issue_filter(self, text):
+        """Hide table rows that don't match the current filter text.
+
+        Matches against file path, issue text, and a best-effort extracted show/movie title.
+        """
+
+        needle = text.strip().lower()
+        selected_issue_ids = set()
+        for i in range(self.issue_type_filter_list.count()):
+            item = self.issue_type_filter_list.item(i)
+            if item.checkState() == Qt.Checked:
+                selected_issue_ids.add(item.data(Qt.UserRole))
+
+        for row in range(self.table.rowCount()):
+            file_item = self.table.item(row, 0)
+            issue_item = self.table.item(row, 1)
+
+            file_text = file_item.text() if file_item is not None else ""
+            issue_text = issue_item.text() if issue_item is not None else ""
+            media_title = self.extract_media_title(file_text)
+
+            haystack = " ".join([file_text, media_title, issue_text]).lower()
+            name_matches = True if not needle else needle in haystack
+
+            issue_text_lower = issue_text.lower()
+            type_matches = (
+                True
+                if not selected_issue_ids
+                else any(
+                    self.issue_type_filter_map[issue_id](issue_text_lower)
+                    for issue_id in selected_issue_ids
+                )
+            )
+
+            self.table.setRowHidden(row, not (name_matches and type_matches))
+
+    def extract_media_title(self, file_path):
+        """Extract a likely show/movie title from a filename.
+
+        Example: `Show Name - S05E21 - Episode ...` -> `Show Name`
+        """
+
+        if not file_path:
+            return ""
+
+        base = os.path.basename(file_path)
+        name = os.path.splitext(base)[0]
+
+        # Common TV naming: "<Title> - S05E21 - <Episode title>"
+        m = re.match(r"^(.*?)\s*-\s*S\d{1,2}E\d{1,2}\b", name, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+
+        # If we find an SxxExx token anywhere, take the part before it.
+        m2 = re.split(r"\bS\d{1,2}E\d{1,2}\b", name, flags=re.IGNORECASE)
+        if len(m2) >= 2 and m2[0].strip():
+            return m2[0].rstrip(" -_.").strip()
+
+        # Movie naming often contains a year; keep the part before it.
+        m3 = re.match(r"^(.*?)(?:\s*[\(\[]\s*\d{4}\s*[\)\]]|\s*\b\d{4}\b)", name)
+        if m3:
+            return m3.group(1).strip()
+
+        return name.strip()
+
     def update_progress(self, current, total, speed, remaining):
 
         self.progress.setMaximum(total)
@@ -246,6 +398,7 @@ class MainWindow(QWidget):
 
     def scan_finished(self, payload):
         self.start_button.setEnabled(True)
+        self.new_scan_button.setEnabled(True)
 
         bad_files = payload.get("bad_files", [])
 
