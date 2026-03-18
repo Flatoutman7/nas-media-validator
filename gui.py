@@ -20,12 +20,12 @@ from worker import ScanWorker
 
 
 class MainWindow(QWidget):
-    """Main GUI window for scanning and displaying media validation issues."""
 
     def __init__(self):
-        """Build the UI and connect signals/handlers."""
 
         super().__init__()
+        self.worker = None
+        self.resume_after = None
 
         self.setWindowTitle("NAS Media Validator")
 
@@ -69,7 +69,6 @@ class MainWindow(QWidget):
         self.setLayout(layout)
 
     def add_issue(self, file, issue):
-        """Add (or append) an issue for a file in the issues table."""
 
         # check if this file already exists in the table
         for row in range(self.table.rowCount()):
@@ -104,8 +103,25 @@ class MainWindow(QWidget):
 
         self.table.scrollToBottom()
 
+    def open_folder_location(self):
+        """Open Windows Explorer at the selected file's folder."""
+
+        row = self.table.currentRow()
+        if row < 0:
+            return
+
+        file_item = self.table.item(row, 0)
+        if not file_item:
+            return
+
+        file_path = os.path.normpath(file_item.text())
+        folder = os.path.dirname(file_path)
+        if not folder:
+            return
+
+        subprocess.run(["explorer", folder], shell=True)
+
     def open_file_location(self):
-        """Open Windows Explorer with the selected file highlighted."""
 
         current_row = self.table.currentRow()
 
@@ -127,16 +143,22 @@ class MainWindow(QWidget):
         subprocess.run(f'explorer /select,"{file_path}"')
 
     def start_scan(self):
-        """Start a background scan and reset the UI for a new run."""
+        if self.worker is not None and self.worker.isRunning():
+            return
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.output.clear()
-        self.table.setRowCount(0)
+        is_resume = self.resume_after is not None
+        if not is_resume:
+            self.output.clear()
+            self.table.setRowCount(0)
 
-        self.label.setText("Scanning NAS...")
+        if is_resume:
+            self.label.setText(f"Resuming scan...")
+        else:
+            self.label.setText("Scanning NAS...")
 
-        self.worker = ScanWorker("Z:/")
+        self.worker = ScanWorker("Z:/", resume_after=self.resume_after)
 
         self.worker.progress.connect(self.update_progress)
         self.worker.log.connect(self.add_log)
@@ -146,13 +168,14 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def stop_scan(self):
-        """Stop the current scan thread (forcefully) and update buttons."""
+        """Request the current scan to stop early and update buttons."""
         if self.worker:
-            self.worker.terminate()
+            self.worker.request_stop()
         self.stop_button.setEnabled(False)
+        self.start_button.setEnabled(True)
+        self.label.setText("Stopping...")
 
     def show_context_menu(self, position):
-        """Show a right-click menu for the currently selected issue row."""
         row = self.table.currentRow()
         if row < 0:
             return
@@ -160,8 +183,10 @@ class MainWindow(QWidget):
         menu = QMenu()
 
         open_action = QAction("Open File Location", self)
+        open_folder_action = QAction("Open Folder", self)
         copy_action = QAction("Copy Path", self)
         open_action.triggered.connect(self.open_file_location)
+        open_folder_action.triggered.connect(self.open_folder_location)
         copy_action.triggered.connect(self.copy_file_path)
 
         play_action = QAction("Play File", self)
@@ -169,13 +194,13 @@ class MainWindow(QWidget):
         play_action.triggered.connect(self.play_file)
 
         menu.addAction(open_action)
+        menu.addAction(open_folder_action)
         menu.addAction(copy_action)
         menu.addAction(play_action)
 
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     def copy_file_path(self):
-        """Copy the selected file path to the clipboard."""
         row = self.table.currentRow()
         if row < 0:
             return
@@ -187,7 +212,6 @@ class MainWindow(QWidget):
         QApplication.clipboard().setText(file_item.text())
 
     def play_file(self):
-        """Open the selected file using the system default handler."""
         row = self.table.currentRow()
         if row < 0:
             return
@@ -199,7 +223,6 @@ class MainWindow(QWidget):
         os.startfile(file_item.text())
 
     def update_progress(self, current, total, speed, remaining):
-        """Update progress bar, window title, and scan stats."""
 
         self.progress.setMaximum(total)
         self.progress.setValue(current)
@@ -215,27 +238,32 @@ class MainWindow(QWidget):
         )
 
     def add_log(self, message):
-        """Append a log line to the output box and auto-scroll."""
 
         self.output.append(message)
 
         scrollbar = self.output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def scan_finished(self, results):
-        """Handle scan completion and print a summary to the log box."""
-
+    def scan_finished(self, payload):
         self.start_button.setEnabled(True)
 
+        bad_files = payload.get("bad_files", [])
+
+        if payload.get("cancelled"):
+            self.resume_after = payload.get("resume_after")
+            self.label.setText("Stopped — ready to resume")
+            self.output.append(
+                f"Scan stopped by user. Resume from: {self.resume_after}"
+            )
+            self.output.append(f"Files with issues so far: {len(bad_files)}")
+            return
+
+        self.resume_after = None
         self.label.setText("Scan Complete")
 
-        self.output.append(f"Files with issues: {len(results)}")
-
-        for file, issues in results:
-
+        self.output.append(f"Files with issues: {len(bad_files)}")
+        for file, issues in bad_files:
             self.output.append(file)
-
             for issue in issues:
                 self.output.append("  - " + issue)
-
             self.output.append("")
