@@ -22,7 +22,7 @@ import subprocess
 import os
 import re
 
-from worker import ScanWorker
+from worker import AutoFixWorker, ScanWorker
 
 
 class MainWindow(QWidget):
@@ -33,6 +33,7 @@ class MainWindow(QWidget):
         self.worker = None
         self.resume_after = None
         self.library_stats_total = None
+        self.auto_fix_worker = None
 
         self.setWindowTitle("NAS Media Validator")
 
@@ -319,9 +320,13 @@ class MainWindow(QWidget):
 
         open_action = QAction("Open File Location", self)
         open_folder_action = QAction("Open Folder", self)
+        auto_fix_file_action = QAction("Auto Fix File", self)
+        auto_fix_folder_action = QAction("Auto Fix Folder", self)
         copy_action = QAction("Copy Path", self)
         open_action.triggered.connect(self.open_file_location)
         open_folder_action.triggered.connect(self.open_folder_location)
+        auto_fix_file_action.triggered.connect(self.auto_fix_file)
+        auto_fix_folder_action.triggered.connect(self.auto_fix_folder)
         copy_action.triggered.connect(self.copy_file_path)
 
         play_action = QAction("Play File", self)
@@ -330,6 +335,8 @@ class MainWindow(QWidget):
 
         menu.addAction(open_action)
         menu.addAction(open_folder_action)
+        menu.addAction(auto_fix_file_action)
+        menu.addAction(auto_fix_folder_action)
         menu.addAction(copy_action)
         menu.addAction(play_action)
 
@@ -356,6 +363,76 @@ class MainWindow(QWidget):
             return
 
         os.startfile(file_item.text())
+
+    def _selected_file_and_issues(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return None, None
+
+        file_item = self.table.item(row, 0)
+        issue_item = self.table.item(row, 1)
+        if file_item is None or issue_item is None:
+            return None, None
+
+        file_path = file_item.text()
+        issues_text = issue_item.text()
+        return file_path, issues_text
+
+    def auto_fix_file(self):
+        """Run ffmpeg to generate a fixed output for the selected file."""
+        input_path, issues_text = self._selected_file_and_issues()
+        if not input_path:
+            return
+
+        self.output.append(f"Auto-fix file: {input_path}")
+        if self.auto_fix_worker and self.auto_fix_worker.isRunning():
+            self.output.append("Auto-fix already running.")
+            return
+
+        self.auto_fix_worker = AutoFixWorker([input_path], {input_path: issues_text})
+        self.auto_fix_worker.log.connect(self.add_log)
+        self.auto_fix_worker.finished.connect(self.auto_fix_finished)
+        self.auto_fix_worker.start()
+
+    def auto_fix_folder(self):
+        """Run ffmpeg auto-fix across all media files in the selected file's folder."""
+        input_path, _issues_text = self._selected_file_and_issues()
+        if not input_path:
+            return
+
+        folder = os.path.dirname(input_path)
+        if not folder:
+            return
+
+        from scanner import MEDIA_EXTENSIONS
+
+        media_inputs = []
+        for root, _dirs, filenames in os.walk(folder):
+            for name in filenames:
+                if name.lower().endswith(MEDIA_EXTENSIONS):
+                    media_inputs.append(os.path.join(root, name))
+
+        if not media_inputs:
+            self.output.append("No media files found in folder.")
+            return
+
+        self.output.append(f"Auto-fix folder ({len(media_inputs)} files): {folder}")
+
+        if self.auto_fix_worker and self.auto_fix_worker.isRunning():
+            self.output.append("Auto-fix already running.")
+            return
+
+        # Folder mode re-analyzes each file inside the worker.
+        self.auto_fix_worker = AutoFixWorker(media_inputs)
+        self.auto_fix_worker.log.connect(self.add_log)
+        self.auto_fix_worker.finished.connect(self.auto_fix_finished)
+        self.auto_fix_worker.start()
+
+    def auto_fix_finished(self, outputs_text: str):
+        """Report auto-fix output paths when the ffmpeg worker is done."""
+        if outputs_text:
+            self.output.append("Auto-fix outputs:")
+            self.output.append(outputs_text)
 
     def apply_issue_filter(self, text):
         """Hide table rows that don't match the current filter text.
