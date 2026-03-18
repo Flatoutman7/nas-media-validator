@@ -24,6 +24,8 @@ class MainWindow(QWidget):
     def __init__(self):
 
         super().__init__()
+        self.worker = None
+        self.resume_after = None
 
         self.setWindowTitle("NAS Media Validator")
 
@@ -66,7 +68,6 @@ class MainWindow(QWidget):
 
         self.setLayout(layout)
 
-
     def add_issue(self, file, issue):
 
         # check if this file already exists in the table
@@ -102,6 +103,24 @@ class MainWindow(QWidget):
 
         self.table.scrollToBottom()
 
+    def open_folder_location(self):
+        """Open Windows Explorer at the selected file's folder."""
+
+        row = self.table.currentRow()
+        if row < 0:
+            return
+
+        file_item = self.table.item(row, 0)
+        if not file_item:
+            return
+
+        file_path = os.path.normpath(file_item.text())
+        folder = os.path.dirname(file_path)
+        if not folder:
+            return
+
+        subprocess.run(["explorer", folder], shell=True)
+
     def open_file_location(self):
 
         current_row = self.table.currentRow()
@@ -124,15 +143,22 @@ class MainWindow(QWidget):
         subprocess.run(f'explorer /select,"{file_path}"')
 
     def start_scan(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.output.clear()
-        self.table.setRowCount(0)
+        is_resume = self.resume_after is not None
+        if not is_resume:
+            self.output.clear()
+            self.table.setRowCount(0)
 
-        self.label.setText("Scanning NAS...")
+        if is_resume:
+            self.label.setText(f"Resuming scan...")
+        else:
+            self.label.setText("Scanning NAS...")
 
-        self.worker = ScanWorker("Z:/")
+        self.worker = ScanWorker("Z:/", resume_after=self.resume_after)
 
         self.worker.progress.connect(self.update_progress)
         self.worker.log.connect(self.add_log)
@@ -142,9 +168,12 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def stop_scan(self):
+        """Request the current scan to stop early and update buttons."""
         if self.worker:
-            self.worker.terminate()
+            self.worker.request_stop()
         self.stop_button.setEnabled(False)
+        self.start_button.setEnabled(True)
+        self.label.setText("Stopping...")
 
     def show_context_menu(self, position):
         row = self.table.currentRow()
@@ -154,8 +183,10 @@ class MainWindow(QWidget):
         menu = QMenu()
 
         open_action = QAction("Open File Location", self)
+        open_folder_action = QAction("Open Folder", self)
         copy_action = QAction("Copy Path", self)
         open_action.triggered.connect(self.open_file_location)
+        open_folder_action.triggered.connect(self.open_folder_location)
         copy_action.triggered.connect(self.copy_file_path)
 
         play_action = QAction("Play File", self)
@@ -163,6 +194,7 @@ class MainWindow(QWidget):
         play_action.triggered.connect(self.play_file)
 
         menu.addAction(open_action)
+        menu.addAction(open_folder_action)
         menu.addAction(copy_action)
         menu.addAction(play_action)
 
@@ -190,7 +222,6 @@ class MainWindow(QWidget):
 
         os.startfile(file_item.text())
 
-
     def update_progress(self, current, total, speed, remaining):
 
         self.progress.setMaximum(total)
@@ -206,7 +237,6 @@ class MainWindow(QWidget):
             f"Files scanned: {current} | Issues: {issues} | Speed: {speed:.1f}/s | ETA: {eta}"
         )
 
-
     def add_log(self, message):
 
         self.output.append(message)
@@ -214,20 +244,26 @@ class MainWindow(QWidget):
         scrollbar = self.output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-
-    def scan_finished(self, results):
-
+    def scan_finished(self, payload):
         self.start_button.setEnabled(True)
 
+        bad_files = payload.get("bad_files", [])
+
+        if payload.get("cancelled"):
+            self.resume_after = payload.get("resume_after")
+            self.label.setText("Stopped — ready to resume")
+            self.output.append(
+                f"Scan stopped by user. Resume from: {self.resume_after}"
+            )
+            self.output.append(f"Files with issues so far: {len(bad_files)}")
+            return
+
+        self.resume_after = None
         self.label.setText("Scan Complete")
 
-        self.output.append(f"Files with issues: {len(results)}")
-
-        for file, issues in results:
-
+        self.output.append(f"Files with issues: {len(bad_files)}")
+        for file, issues in bad_files:
             self.output.append(file)
-
             for issue in issues:
                 self.output.append("  - " + issue)
-
             self.output.append("")

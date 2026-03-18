@@ -1,5 +1,6 @@
 from PySide6.QtCore import QThread, Signal
 import main
+import threading
 
 
 class ScanWorker(QThread):
@@ -7,11 +8,17 @@ class ScanWorker(QThread):
     progress = Signal(int, int, float, float)
     log = Signal(str)
     issue = Signal(str, str)
-    finished = Signal(list)
+    finished = Signal(object)
 
-    def __init__(self, path):
+    def __init__(self, path, resume_after=None):
         super().__init__()
         self.path = path
+        self.resume_after = resume_after
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        """Signal the scan to stop early (cooperative cancellation)."""
+        self._stop_event.set()
 
     def run(self):
 
@@ -24,11 +31,13 @@ class ScanWorker(QThread):
         def issue_update(file, issue):
             self.issue.emit(file, issue)
 
-        results = main.run_scan(
+        payload = main.run_scan(
             self.path,
             progress_callback=progress_update,
             log_callback=log_update,
-            issue_callback=issue_update
+            issue_callback=issue_update,
+            resume_after=self.resume_after,
+            stop_event=self._stop_event,
         )
 
-        self.finished.emit(results)
+        self.finished.emit(payload)
