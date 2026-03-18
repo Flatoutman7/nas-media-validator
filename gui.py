@@ -20,8 +20,10 @@ from worker import ScanWorker
 
 
 class MainWindow(QWidget):
+    """Main GUI window for scanning and displaying media validation issues."""
 
     def __init__(self):
+        """Build the UI and connect signals/handlers."""
 
         super().__init__()
 
@@ -66,8 +68,8 @@ class MainWindow(QWidget):
 
         self.setLayout(layout)
 
-
     def add_issue(self, file, issue):
+        """Add (or append) an issue for a file in the issues table."""
 
         # check if this file already exists in the table
         for row in range(self.table.rowCount()):
@@ -103,6 +105,7 @@ class MainWindow(QWidget):
         self.table.scrollToBottom()
 
     def open_file_location(self):
+        """Open Windows Explorer with the selected file highlighted."""
 
         current_row = self.table.currentRow()
 
@@ -124,6 +127,7 @@ class MainWindow(QWidget):
         subprocess.run(f'explorer /select,"{file_path}"')
 
     def start_scan(self):
+        """Start a background scan and reset the UI for a new run."""
 
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -142,11 +146,13 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def stop_scan(self):
+        """Stop the current scan thread (forcefully) and update buttons."""
         if self.worker:
             self.worker.terminate()
         self.stop_button.setEnabled(False)
 
     def show_context_menu(self, position):
+        """Show a right-click menu for the currently selected issue row."""
         row = self.table.currentRow()
         if row < 0:
             return
@@ -169,6 +175,7 @@ class MainWindow(QWidget):
         menu.exec(self.table.viewport().mapToGlobal(position))
 
     def copy_file_path(self):
+        """Copy the selected file path to the clipboard."""
         row = self.table.currentRow()
         if row < 0:
             return
@@ -180,6 +187,7 @@ class MainWindow(QWidget):
         QApplication.clipboard().setText(file_item.text())
 
     def play_file(self):
+        """Open the selected file using the system default handler."""
         row = self.table.currentRow()
         if row < 0:
             return
@@ -190,8 +198,8 @@ class MainWindow(QWidget):
 
         os.startfile(file_item.text())
 
-
     def update_progress(self, current, total, speed, remaining):
+        """Update progress bar, window title, and scan stats."""
 
         self.progress.setMaximum(total)
         self.progress.setValue(current)
@@ -206,16 +214,16 @@ class MainWindow(QWidget):
             f"Files scanned: {current} | Issues: {issues} | Speed: {speed:.1f}/s | ETA: {eta}"
         )
 
-
     def add_log(self, message):
+        """Append a log line to the output box and auto-scroll."""
 
         self.output.append(message)
 
         scrollbar = self.output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-
     def scan_finished(self, results):
+        """Handle scan completion and print a summary to the log box."""
 
         self.start_button.setEnabled(True)
 

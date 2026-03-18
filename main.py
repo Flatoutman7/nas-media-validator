@@ -6,12 +6,19 @@ from report import save_report
 MEDIA_FOLDER = "Z:/"
 
 
-def run_scan(path=MEDIA_FOLDER, progress_callback=None, log_callback=None, issue_callback=None):
+def run_scan(
+    path=MEDIA_FOLDER, progress_callback=None, log_callback=None, issue_callback=None
+):
+    """Scan a folder for media files and return a list of issues found.
+
+    Uses thread pooling for faster validation and optionally reports progress/logs/issues via callbacks.
+    """
 
     import time
     from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
     def log(msg):
+        """Send a message to the optional log callback."""
         if log_callback:
             log_callback(msg)
 
@@ -25,6 +32,7 @@ def run_scan(path=MEDIA_FOLDER, progress_callback=None, log_callback=None, issue
     start_time = time.time()
 
     def process_file(file):
+        """Validate one file and return (file, issues) if any issues were found."""
         issues = check_file(file)
         if issues:
             return (file, issues)
@@ -32,7 +40,7 @@ def run_scan(path=MEDIA_FOLDER, progress_callback=None, log_callback=None, issue
 
     futures = set()
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=32) as executor:
 
         for file in scan_folder(path):
 
@@ -60,10 +68,14 @@ def run_scan(path=MEDIA_FOLDER, progress_callback=None, log_callback=None, issue
 
                     elapsed = time.time() - start_time
                     speed = files_processed / elapsed if elapsed > 0 else 0
-                    remaining = (total_discovered - files_processed) / speed if speed > 0 else 0
+                    remaining = (
+                        (total_discovered - files_processed) / speed if speed > 0 else 0
+                    )
 
                     if progress_callback:
-                        progress_callback(files_processed, total_discovered, speed, remaining)
+                        progress_callback(
+                            files_processed, total_discovered, speed, remaining
+                        )
 
         # finish remaining futures
         for future in futures:
