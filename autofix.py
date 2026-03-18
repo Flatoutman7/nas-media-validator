@@ -47,6 +47,11 @@ def build_ffmpeg_command(
     else:
         issues_text = ",".join([str(i).lower() for i in (issues or [])])
 
+    # Failsafe: if there is no audio, we can't "fix" it safely (and audio
+    # issues might already be caused by an earlier FileFlows step).
+    if "no audio stream found" in issues_text:
+        return None, None
+
     input_path_norm = os.path.normpath(input_path)
     folder = os.path.dirname(input_path_norm)
     base = os.path.splitext(os.path.basename(input_path_norm))[0]
@@ -108,11 +113,10 @@ def build_ffmpeg_command(
         # Scale keeping aspect ratio; -2 forces even width.
         filter_args = ["-vf", f"scale=-2:{expected_height}"]
 
-    # If there are multiple tracks, keep Plex-friendlier "first stream only".
-    multiple_audio_issue = "multiple audio tracks detected" in issues_text
+    # Keep Plex-friendlier "first stream only" for reliability.
     multiple_subtitle_issue = "multiple subtitle tracks detected" in issues_text
 
-    # Map video+audio, optionally subtitles.
+    # Map video + first audio, optionally subtitles.
     # -map 0:a:0? makes audio optional.
     cmd = [
         "ffmpeg",
@@ -122,13 +126,9 @@ def build_ffmpeg_command(
         input_path_norm,
         "-map",
         "0:v:0",
+        "-map",
+        "0:a:0?",
     ]
-
-    # Audio mapping
-    if multiple_audio_issue:
-        cmd += ["-map", "0:a:0?"]
-    else:
-        cmd += ["-map", "0:a?"]
 
     # Subtitle mapping / removal
     if remove_subtitles:

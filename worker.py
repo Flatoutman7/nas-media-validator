@@ -88,8 +88,27 @@ class AutoFixWorker(QThread):
             if proc.returncode != 0:
                 self.log.emit(f"Auto-fix failed (exit {proc.returncode}).")
             else:
-                # Overwrite the original file only when ffmpeg succeeded.
-                os.replace(temp_output_path, input_path)
-                self.log.emit(f"Auto-fix complete (replaced): {input_path}")
+                # Failsafe: if the generated output has no audio, do not
+                # overwrite the original. This prevents "lost audio" cases.
+                try:
+                    _issues_out, stats_out = analyze_file(temp_output_path)
+                    audio_found = bool(stats_out.get("audio_found"))
+                except Exception:
+                    # If we can't verify the output, do not overwrite the original.
+                    audio_found = False
+
+                if not audio_found:
+                    self.log.emit(
+                        "Auto-fix skipped overwrite: output has no audio (failsafe)."
+                    )
+                    try:
+                        os.remove(temp_output_path)
+                    except Exception:
+                        pass
+                else:
+                    # Overwrite the original file only when ffmpeg succeeded
+                    # AND the output still contains audio.
+                    os.replace(temp_output_path, input_path)
+                    self.log.emit(f"Auto-fix complete (replaced): {input_path}")
 
         self.finished.emit("Auto-fix finished.")
