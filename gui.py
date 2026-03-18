@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QTableWidget,
     QTableWidgetItem,
+    QMenu,
+    QApplication,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
@@ -51,14 +53,8 @@ class MainWindow(QWidget):
         self.table.setColumnWidth(0, 500)
         self.table.setColumnWidth(1, 300)
         self.table.cellDoubleClicked.connect(self.open_file_location)
-
-        # ---- RIGHT CLICK MENU ----
-        self.table.setContextMenuPolicy(Qt.ActionsContextMenu)
-
-        open_action = QAction("Open File Location", self)
-        open_action.triggered.connect(self.open_file_location)
-
-        self.table.addAction(open_action)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
 
         layout.addWidget(self.label)
         layout.addWidget(self.start_button)
@@ -107,7 +103,7 @@ class MainWindow(QWidget):
         self.table.scrollToBottom()
 
     def open_file_location(self):
-        
+
         current_row = self.table.currentRow()
 
         if current_row < 0:
@@ -126,7 +122,6 @@ class MainWindow(QWidget):
         file_path = os.path.normpath(file_path)
 
         subprocess.run(f'explorer /select,"{file_path}"')
-
 
     def start_scan(self):
 
@@ -149,7 +144,51 @@ class MainWindow(QWidget):
     def stop_scan(self):
         if self.worker:
             self.worker.terminate()
-        self.stop_button.setEnabled(False)    
+        self.stop_button.setEnabled(False)
+
+    def show_context_menu(self, position):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+
+        menu = QMenu()
+
+        open_action = QAction("Open File Location", self)
+        copy_action = QAction("Copy Path", self)
+        open_action.triggered.connect(self.open_file_location)
+        copy_action.triggered.connect(self.copy_file_path)
+
+        play_action = QAction("Play File", self)
+
+        play_action.triggered.connect(self.play_file)
+
+        menu.addAction(open_action)
+        menu.addAction(copy_action)
+        menu.addAction(play_action)
+
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def copy_file_path(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+
+        file_item = self.table.item(row, 0)
+        if file_item is None:
+            return
+
+        QApplication.clipboard().setText(file_item.text())
+
+    def play_file(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+
+        file_item = self.table.item(row, 0)
+        if file_item is None:
+            return
+
+        os.startfile(file_item.text())
 
 
     def update_progress(self, current, total, speed, remaining):
@@ -165,7 +204,7 @@ class MainWindow(QWidget):
 
         self.stats.setText(
             f"Files scanned: {current} | Issues: {issues} | Speed: {speed:.1f}/s | ETA: {eta}"
-    )
+        )
 
 
     def add_log(self, message):
