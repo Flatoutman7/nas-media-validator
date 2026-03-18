@@ -22,7 +22,12 @@ import subprocess
 import os
 import re
 
-from worker import AutoFixWorker, ScanWorker, SonarrRedownloadWorker
+from worker import (
+    AutoFixWorker,
+    ScanWorker,
+    SonarrRedownloadWorker,
+    RadarrRedownloadWorker,
+)
 
 
 class MainWindow(QWidget):
@@ -35,6 +40,7 @@ class MainWindow(QWidget):
         self.library_stats_total = None
         self.auto_fix_worker = None
         self.sonarr_redownload_worker = None
+        self.radarr_redownload_worker = None
 
         self.setWindowTitle("NAS Media Validator")
 
@@ -324,12 +330,14 @@ class MainWindow(QWidget):
         auto_fix_file_action = QAction("Auto Fix File", self)
         auto_fix_folder_action = QAction("Auto Fix Folder", self)
         redownload_sonarr_action = QAction("Redownload Missing (Sonarr)", self)
+        redownload_radarr_action = QAction("Redownload Missing (Radarr)", self)
         copy_action = QAction("Copy Path", self)
         open_action.triggered.connect(self.open_file_location)
         open_folder_action.triggered.connect(self.open_folder_location)
         auto_fix_file_action.triggered.connect(self.auto_fix_file)
         auto_fix_folder_action.triggered.connect(self.auto_fix_folder)
         redownload_sonarr_action.triggered.connect(self.redownload_missing_sonarr)
+        redownload_radarr_action.triggered.connect(self.redownload_missing_radarr)
         copy_action.triggered.connect(self.copy_file_path)
 
         play_action = QAction("Play File", self)
@@ -341,6 +349,7 @@ class MainWindow(QWidget):
         menu.addAction(auto_fix_file_action)
         menu.addAction(auto_fix_folder_action)
         menu.addAction(redownload_sonarr_action)
+        menu.addAction(redownload_radarr_action)
         menu.addAction(copy_action)
         menu.addAction(play_action)
 
@@ -479,6 +488,50 @@ class MainWindow(QWidget):
             lambda msg: self.output.append(f"Sonarr: {msg}")
         )
         self.sonarr_redownload_worker.start()
+
+    def redownload_missing_radarr(self):
+        """
+        Ask Radarr to search for missing movies for the selected row.
+
+        This is intended for movie-like filenames (no SxxEyy pattern).
+        """
+
+        input_path, issues_text = self._selected_file_and_issues()
+        if not input_path:
+            return
+
+        issues_lower = (issues_text or "").lower()
+        missing_audio = "no audio stream found" in issues_lower
+        missing_video = "no video stream found" in issues_lower
+        if not (missing_audio or missing_video):
+            self.output.append(
+                "Redownload via Radarr: selected row does not indicate missing audio/video."
+            )
+            return
+
+        base = os.path.basename(input_path)
+        if re.search(r"\bS\d{1,2}E\d{1,2}\b", base, flags=re.IGNORECASE):
+            self.output.append(
+                "Redownload via Radarr: not detected as a movie name (use Sonarr for TV)."
+            )
+            return
+
+        movie_term = self.extract_media_title(input_path)
+        if not movie_term:
+            self.output.append("Redownload via Radarr: could not extract movie title.")
+            return
+
+        if self.radarr_redownload_worker and self.radarr_redownload_worker.isRunning():
+            self.output.append("Radarr redownload already running.")
+            return
+
+        self.output.append(f"Radarr: redownload requested for '{movie_term}'")
+        self.radarr_redownload_worker = RadarrRedownloadWorker(movie_term)
+        self.radarr_redownload_worker.log.connect(self.add_log)
+        self.radarr_redownload_worker.finished.connect(
+            lambda msg: self.output.append(f"Radarr: {msg}")
+        )
+        self.radarr_redownload_worker.start()
 
     def auto_fix_finished(self, outputs_text: str):
         """Report auto-fix output paths when the ffmpeg worker is done."""

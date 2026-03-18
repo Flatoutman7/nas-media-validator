@@ -8,6 +8,7 @@ from autofix import build_ffmpeg_command
 from arr_config import load_arr_config
 from rules import analyze_file
 from sonarr_client import SonarrClient
+from radarr_client import RadarrClient
 
 
 class ScanWorker(QThread):
@@ -157,3 +158,46 @@ class SonarrRedownloadWorker(QThread):
         resp = client.missing_episode_search(series_id)
         self.log.emit(f"Sonarr response: {resp}")
         self.finished.emit("Sonarr redownload triggered.")
+
+
+class RadarrRedownloadWorker(QThread):
+    log = Signal(str)
+    finished = Signal(str)
+
+    def __init__(self, movie_term: str):
+        super().__init__()
+        self.movie_term = movie_term
+
+    def run(self):
+        cfg = load_arr_config()
+        radarr_cfg = (cfg or {}).get("radarr") if cfg else None
+        if not radarr_cfg:
+            self.log.emit(
+                "Radarr not configured. Create `arr_config.json` with a `radarr` object."
+            )
+            self.finished.emit("Radarr missing config.")
+            return
+
+        base_url = radarr_cfg.get("base_url")
+        api_key = radarr_cfg.get("api_key")
+        if not base_url or not api_key:
+            self.log.emit(
+                "Radarr config incomplete. `base_url` and `api_key` are required."
+            )
+            self.finished.emit("Radarr config incomplete.")
+            return
+
+        client = RadarrClient(base_url=base_url, api_key=api_key)
+        self.log.emit(f"Radarr: looking up movie for '{self.movie_term}'...")
+        movie_id = client.find_movie_id(self.movie_term)
+        if not movie_id:
+            self.log.emit("Radarr: could not find a matching movie ID.")
+            self.finished.emit("No matching movie.")
+            return
+
+        self.log.emit(
+            f"Radarr: triggering missing movie search (movieId={movie_id})..."
+        )
+        resp = client.missing_movie_search(movie_id)
+        self.log.emit(f"Radarr response: {resp}")
+        self.finished.emit("Radarr redownload triggered.")
