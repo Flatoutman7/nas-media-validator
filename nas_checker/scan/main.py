@@ -1,9 +1,9 @@
-from scanner import scan_folder
-from rules import analyze_file
+from nas_checker.scan.scanner import scan_folder
+from nas_checker.scan.rules import analyze_file
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from report import save_report
-from hardware import recommend_scan_workers
-from scan_metadata_cache import ScanMetadataCache
+from nas_checker.output.report import save_report
+from health.hardware import recommend_scan_workers
+from health.scan_metadata_cache import ScanMetadataCache
 
 MEDIA_FOLDER = "Z:/"
 
@@ -303,7 +303,7 @@ if __name__ == "__main__":
     if "--gui" in sys.argv:
 
         from PySide6.QtWidgets import QApplication
-        from gui import MainWindow
+        from nas_checker.gui.gui import MainWindow
 
         app = QApplication(sys.argv)
 

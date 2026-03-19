@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from rules import analyze_file as analyze_file_uncached
+from nas_checker.scan.rules import analyze_file as analyze_file_uncached
 
 
 def canonicalize_path_key(path: str) -> str:

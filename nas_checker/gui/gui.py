@@ -27,14 +27,14 @@ import subprocess
 import os
 import re
 
-from worker import (
+from nas_checker.workers.worker import (
     AutoFixWorker,
     ScanWorker,
     SonarrRedownloadWorker,
     RadarrRedownloadWorker,
 )
-from scan_history import ScanHistory
-from hardware import get_storage_profile
+from health.scan_history import ScanHistory
+from health.hardware import get_storage_profile
 
 
 class MainWindow(QWidget):
@@ -526,7 +526,7 @@ class MainWindow(QWidget):
         if not folder:
             return
 
-        from scanner import MEDIA_EXTENSIONS
+        from nas_checker.scan.scanner import MEDIA_EXTENSIONS
 
         media_inputs = []
         for root, _dirs, filenames in os.walk(folder):

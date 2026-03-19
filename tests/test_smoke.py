@@ -10,10 +10,12 @@ def test_smoke_imports():
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
-    import hardware  # noqa: F401
-    import scan_history  # noqa: F401
-    import scan_metadata_cache  # noqa: F401
-    import main
+    from nas_checker.scan.main import run_scan  # noqa: F401
+    from health.hardware import recommend_scan_workers  # noqa: F401
+    from health.scan_history import ScanHistory  # noqa: F401
+    from health.scan_metadata_cache import ScanMetadataCache  # noqa: F401
 
-    assert callable(main.run_scan)
-    assert callable(hardware.recommend_scan_workers)
+    assert callable(run_scan)
+    assert callable(recommend_scan_workers)
+    assert ScanHistory is not None
+    assert ScanMetadataCache is not None
