@@ -4,6 +4,7 @@ __pycache__/
 bad_media_report.csv
 arr_config.json
 scan_history.json
+scan_rules_settings.json
 health_settings.json
 scan_metadata.db
 *.spec

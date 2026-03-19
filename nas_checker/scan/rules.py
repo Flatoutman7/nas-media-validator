@@ -31,7 +31,7 @@ def get_media_info(file):
     return json.loads(result.stdout)
 
 
-def analyze_file(file):
+def analyze_file(file, rules_settings=None):
     """Return (issues, stats) for a file using a single ffprobe call.
 
     `issues` is the list of validation problems, and `stats` contains per-file
@@ -40,6 +40,8 @@ def analyze_file(file):
 
     stats = {
         "container_is_mp4": file.lower().endswith(".mp4"),
+        "container_ext": os.path.splitext(file)[1].lower().lstrip("."),
+        "container_is_allowed": True,
         "min_file_size_issue": False,
         "media_info_error": False,
         "video_found": False,
@@ -73,8 +75,34 @@ def analyze_file(file):
         stats["min_file_size_issue"] = True
 
     # check container
-    if not stats["container_is_mp4"]:
-        issues.append("Container is not MP4")
+    allowed_containers = {"mp4"}
+    allowed_video_codecs = {"hevc"}
+    allowed_audio_codecs = {"aac"}
+    if isinstance(rules_settings, dict):
+        try:
+            allowed_containers = {
+                str(x).strip().lower().lstrip(".")
+                for x in (rules_settings.get("containers") or [])
+                if str(x).strip()
+            } or allowed_containers
+            allowed_video_codecs = {
+                str(x).strip().lower()
+                for x in (rules_settings.get("video_codecs") or [])
+                if str(x).strip()
+            } or allowed_video_codecs
+            allowed_audio_codecs = {
+                str(x).strip().lower()
+                for x in (rules_settings.get("audio_codecs") or [])
+                if str(x).strip()
+            } or allowed_audio_codecs
+        except Exception:
+            # If settings are invalid, fall back to defaults.
+            pass
+
+    container_ext = stats.get("container_ext") or os.path.splitext(file)[1].lower().lstrip(".")
+    stats["container_is_allowed"] = container_ext in allowed_containers
+    if not stats["container_is_allowed"]:
+        issues.append(f"Container is not allowed: {container_ext}")
 
     def parse_rational(value):
         if not value:
@@ -154,15 +182,15 @@ def analyze_file(file):
                 if color_transfer in {"smpte2084", "arib-std-b67"}:
                     stats["hdr_detected"] = True
 
-            if codec_name != "hevc":
-                issues.append(f"Video codec is {codec_name}, not HEVC")
+            if codec_name.lower() not in allowed_video_codecs:
+                issues.append(f"Video codec is {codec_name}, not allowed")
 
         elif codec_type == "audio":
             stats["audio_found"] = True
             stats["audio_track_count"] += 1
             stats["audio_codecs"].append(codec_name)
-            if codec_name != "aac":
-                issues.append(f"Audio codec is {codec_name}, not AAC")
+            if codec_name.lower() not in allowed_audio_codecs:
+                issues.append(f"Audio codec is {codec_name}, not allowed")
 
             commentary = bool(disposition.get("commentary", 0))
             title = (tags.get("title") or "").lower()

@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from nas_checker.scan.rules import analyze_file as analyze_file_uncached
+from nas_checker.scan.scan_rules_settings import (
+    compute_scan_rules_hash,
+    normalize_scan_rules_settings,
+)
 
 
 def canonicalize_path_key(path: str) -> str:
@@ -38,7 +42,11 @@ class ScanMetadataCache:
     - reuse cached (issues, stats) when unchanged
     """
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        rules_settings: dict[str, Any] | None = None,
+    ):
         self.db_path = db_path
         self._local = threading.local()  # sqlite connection per thread
 
@@ -48,6 +56,8 @@ class ScanMetadataCache:
         self.misses = 0
 
         self._write_lock = threading.Lock()
+        self.rules_settings = normalize_scan_rules_settings(rules_settings)
+        self.rules_hash = compute_scan_rules_hash(self.rules_settings)
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -89,7 +99,7 @@ class ScanMetadataCache:
     def _load_cached(
         self, file_path: str, meta: FileMeta
     ) -> tuple[list[str], dict[str, Any]] | None:
-        path_key = canonicalize_path_key(file_path)
+        path_key = canonicalize_path_key(file_path) + f"::{self.rules_hash}"
         conn = self._conn()
 
         cur = conn.execute(
@@ -123,7 +133,7 @@ class ScanMetadataCache:
         stats: dict[str, Any],
         status: str,
     ) -> None:
-        path_key = canonicalize_path_key(file_path)
+        path_key = canonicalize_path_key(file_path) + f"::{self.rules_hash}"
         conn = self._conn()
 
         record = (
@@ -168,7 +178,9 @@ class ScanMetadataCache:
             issues, stats = cached
             return issues, stats, True
 
-        issues, stats = analyze_file_uncached(file_path)
+        issues, stats = analyze_file_uncached(
+            file_path, rules_settings=self.rules_settings
+        )
         self._save_cached(file_path, meta, issues, stats, status="computed")
         return issues, stats, False
 

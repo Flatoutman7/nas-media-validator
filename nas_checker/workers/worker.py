@@ -7,6 +7,7 @@ import subprocess
 from nas_checker.media.autofix import build_ffmpeg_command
 from nas_checker.arr.arr_config import load_arr_config
 from nas_checker.scan.rules import analyze_file
+from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
 from nas_checker.arr.sonarr_client import SonarrClient
 from nas_checker.arr.radarr_client import RadarrClient
 
@@ -61,11 +62,14 @@ class AutoFixWorker(QThread):
         self.issues_by_input = issues_by_input or {}
 
     def run(self):
+        rules_settings = load_scan_rules_settings()
         for input_path in self.inputs:
             issues = self.issues_by_input.get(input_path)
             if issues is None:
                 # For folder mode, we re-analyze the file so the fix matches.
-                issues, _stats = analyze_file(input_path)
+                issues, _stats = analyze_file(
+                    input_path, rules_settings=rules_settings
+                )
 
             cmd, temp_output_path = build_ffmpeg_command(input_path, issues)
             if cmd is None or temp_output_path is None:
@@ -94,7 +98,9 @@ class AutoFixWorker(QThread):
                 # Failsafe: if the generated output has no audio, do not
                 # overwrite the original. This prevents "lost audio" cases.
                 try:
-                    _issues_out, stats_out = analyze_file(temp_output_path)
+                    _issues_out, stats_out = analyze_file(
+                        temp_output_path, rules_settings=rules_settings
+                    )
                     audio_found = bool(stats_out.get("audio_found"))
                 except Exception:
                     # If we can't verify the output, do not overwrite the original.

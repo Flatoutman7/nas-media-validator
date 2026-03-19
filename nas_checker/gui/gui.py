@@ -35,6 +35,11 @@ from nas_checker.workers.worker import (
 )
 from health.scan_history import ScanHistory
 from health.hardware import get_storage_profile
+from nas_checker.scan.scan_rules_settings import (
+    DEFAULT_SCAN_RULES_SETTINGS,
+    load_scan_rules_settings,
+    save_scan_rules_settings,
+)
 
 
 class MainWindow(QWidget):
@@ -72,6 +77,47 @@ class MainWindow(QWidget):
 
         self.tabs.addTab(issues_widget, "Issues")
         self.tabs.addTab(stats_widget, "Library Stats")
+
+        # --- Scan Settings Widget ---
+        settings_widget = QWidget()
+        settings_layout = QVBoxLayout()
+
+        settings_title = QLabel("Scan Settings")
+        settings_title.setStyleSheet("font-weight: bold; font-size: 16px;")
+        settings_layout.addWidget(settings_title)
+
+        # Containers.
+        settings_layout.addWidget(QLabel("Containers to accept (extensions, comma-separated)"))
+        self.scan_rules_containers_edit = QLineEdit()
+        settings_layout.addWidget(self.scan_rules_containers_edit)
+
+        # Video codecs.
+        settings_layout.addWidget(QLabel("Video codecs to accept (codec_name, comma-separated)"))
+        self.scan_rules_video_codecs_edit = QLineEdit()
+        settings_layout.addWidget(self.scan_rules_video_codecs_edit)
+
+        # Audio codecs.
+        settings_layout.addWidget(QLabel("Audio codecs to accept (codec_name, comma-separated)"))
+        self.scan_rules_audio_codecs_edit = QLineEdit()
+        settings_layout.addWidget(self.scan_rules_audio_codecs_edit)
+
+        # Buttons.
+        self.scan_rules_save_button = QPushButton("Save Scan Settings")
+        self.scan_rules_save_button.clicked.connect(self._save_scan_rules_settings_from_ui)
+        settings_layout.addWidget(self.scan_rules_save_button)
+
+        self.scan_rules_reset_button = QPushButton("Reset to Defaults")
+        self.scan_rules_reset_button.clicked.connect(
+            self._reset_scan_rules_settings_to_defaults
+        )
+        settings_layout.addWidget(self.scan_rules_reset_button)
+
+        self.scan_rules_settings_status_label = QLabel("")
+        settings_layout.addWidget(self.scan_rules_settings_status_label)
+
+        settings_layout.addStretch(1)
+        settings_widget.setLayout(settings_layout)
+        self.tabs.addTab(settings_widget, "Scan Settings")
 
         history_widget = QWidget()
         history_layout = QVBoxLayout()
@@ -168,6 +214,7 @@ class MainWindow(QWidget):
         health_widget.setLayout(health_layout)
         self.tabs.addTab(health_widget, "NAS Health")
 
+        self._init_scan_rules_settings_and_render()
         self._render_scan_history_table()
         self._init_health_settings_and_render()
         main_layout.addWidget(self.tabs)
@@ -204,10 +251,10 @@ class MainWindow(QWidget):
         self.issue_type_filter_map = {
             # NOTE: input `t` is already lowercase in `apply_issue_filter()`.
             "file_small": lambda t: "file suspiciously small" in t,
-            "container": lambda t: "container is not mp4" in t,
+            "container": lambda t: "container is not allowed" in t,
             "media_info_error": lambda t: "could not read media info" in t,
-            "video_codec": lambda t: "video codec is" in t and "not hevc" in t,
-            "audio_codec": lambda t: "audio codec is" in t and "not aac" in t,
+            "video_codec": lambda t: "video codec is" in t and "not allowed" in t,
+            "audio_codec": lambda t: "audio codec is" in t and "not allowed" in t,
             "subtitles": lambda t: "subtitle track detected" in t,
             "no_video": lambda t: "no video stream found" in t,
             "no_audio": lambda t: "no audio stream found" in t,
@@ -223,10 +270,10 @@ class MainWindow(QWidget):
         }
         self.issue_type_items = [
             ("File too small", "file_small"),
-            ("Container (not MP4)", "container"),
+            ("Container (not allowed)", "container"),
             ("Media info error", "media_info_error"),
-            ("Video codec (not HEVC)", "video_codec"),
-            ("Audio codec (not AAC)", "audio_codec"),
+            ("Video codec (not allowed)", "video_codec"),
+            ("Audio codec (not allowed)", "audio_codec"),
             ("Subtitles detected", "subtitles"),
             ("Missing video", "no_video"),
             ("Missing audio", "no_audio"),
@@ -929,6 +976,76 @@ class MainWindow(QWidget):
         self._render_nas_health_tab_latest()
         self._render_drive_info_in_nas_health_tab()
 
+    def _init_scan_rules_settings_and_render(self) -> None:
+        self.scan_rules_settings_path = os.path.join(
+            os.path.dirname(__file__), "scan_rules_settings.json"
+        )
+        self.scan_rules_settings = load_scan_rules_settings(
+            self.scan_rules_settings_path
+        )
+
+        self.scan_rules_containers_edit.setText(
+            ",".join(self.scan_rules_settings.get("containers") or [])
+        )
+        self.scan_rules_video_codecs_edit.setText(
+            ",".join(self.scan_rules_settings.get("video_codecs") or [])
+        )
+        self.scan_rules_audio_codecs_edit.setText(
+            ",".join(self.scan_rules_settings.get("audio_codecs") or [])
+        )
+
+        self.scan_rules_settings_status_label.setText("Scan settings loaded.")
+
+    def _parse_csv_list(self, text: str) -> list[str]:
+        # Parse comma-separated tokens; normalize to lowercase; strip dots.
+        items: list[str] = []
+        for raw in (text or "").split(","):
+            s = raw.strip().lower()
+            if not s:
+                continue
+            if s.startswith("."):
+                s = s[1:]
+            items.append(s)
+        # stable unique
+        seen: set[str] = set()
+        out: list[str] = []
+        for x in items:
+            if x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+        return out
+
+    def _save_scan_rules_settings_from_ui(self) -> None:
+        containers = self._parse_csv_list(self.scan_rules_containers_edit.text())
+        video_codecs = self._parse_csv_list(self.scan_rules_video_codecs_edit.text())
+        audio_codecs = self._parse_csv_list(self.scan_rules_audio_codecs_edit.text())
+
+        # If user clears a field, fall back to defaults for that category.
+        settings = dict(DEFAULT_SCAN_RULES_SETTINGS)
+        if containers:
+            settings["containers"] = containers
+        if video_codecs:
+            settings["video_codecs"] = video_codecs
+        if audio_codecs:
+            settings["audio_codecs"] = audio_codecs
+
+        save_scan_rules_settings(settings, self.scan_rules_settings_path)
+        self.scan_rules_settings = load_scan_rules_settings(self.scan_rules_settings_path)
+        self.scan_rules_settings_status_label.setText("Scan settings saved.")
+
+    def _reset_scan_rules_settings_to_defaults(self) -> None:
+        self.scan_rules_containers_edit.setText(
+            ",".join(DEFAULT_SCAN_RULES_SETTINGS.get("containers") or [])
+        )
+        self.scan_rules_video_codecs_edit.setText(
+            ",".join(DEFAULT_SCAN_RULES_SETTINGS.get("video_codecs") or [])
+        )
+        self.scan_rules_audio_codecs_edit.setText(
+            ",".join(DEFAULT_SCAN_RULES_SETTINGS.get("audio_codecs") or [])
+        )
+        self.scan_rules_settings_status_label.setText("Defaults loaded (click Save).")
+
     def _load_health_settings(self) -> dict:
         defaults = {
             "schedule_type": "Weekly",
@@ -1226,7 +1343,7 @@ class MainWindow(QWidget):
         return {
             "scanned_files": 0,
             "files_with_issues": 0,
-            "container_not_mp4": 0,
+            "container_not_allowed": 0,
             "video_codec_counts": {},
             "audio_codec_counts": {},
             "subtitle_tracks": 0,
@@ -1249,7 +1366,7 @@ class MainWindow(QWidget):
         for key in (
             "scanned_files",
             "files_with_issues",
-            "container_not_mp4",
+            "container_not_allowed",
             "subtitle_tracks",
             "missing_video",
             "missing_audio",
@@ -1286,7 +1403,10 @@ class MainWindow(QWidget):
         s = []
         s.append(f"Scanned files: {self.library_stats_total['scanned_files']}")
         s.append(f"Files with issues: {self.library_stats_total['files_with_issues']}")
-        s.append(f"Container not MP4: {self.library_stats_total['container_not_mp4']}")
+        s.append(
+            "Container not allowed: "
+            f"{self.library_stats_total['container_not_allowed']}"
+        )
         s.append(f"Missing video stream: {self.library_stats_total['missing_video']}")
         s.append(f"Missing audio stream: {self.library_stats_total['missing_audio']}")
         s.append(

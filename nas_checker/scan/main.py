@@ -1,9 +1,9 @@
 from nas_checker.scan.scanner import scan_folder
-from nas_checker.scan.rules import analyze_file
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from nas_checker.output.report import save_report
 from health.hardware import recommend_scan_workers
 from health.scan_metadata_cache import ScanMetadataCache
+from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
 
 MEDIA_FOLDER = "Z:/"
 
@@ -29,7 +29,7 @@ def run_scan(
     stats_delta = {
         "scanned_files": 0,
         "files_with_issues": 0,
-        "container_not_mp4": 0,
+        "container_not_allowed": 0,
         "video_codec_counts": {},
         "audio_codec_counts": {},
         "subtitle_tracks": 0,
@@ -62,7 +62,11 @@ def run_scan(
 
     log(f"Parallel workers: {max_workers}")
 
-    cache = ScanMetadataCache(db_path=os.path.join(os.path.dirname(__file__), "scan_metadata.db"))
+    rules_settings = load_scan_rules_settings()
+    cache = ScanMetadataCache(
+        db_path=os.path.join(os.path.dirname(__file__), "scan_metadata.db"),
+        rules_settings=rules_settings,
+    )
     cache_hits = 0
     cache_misses = 0
 
@@ -129,8 +133,8 @@ def run_scan(
 
                     # stats aggregation uses the per-file stats regardless of issue count
                     stats_delta["scanned_files"] += 1
-                    if not file_stats.get("container_is_mp4", True):
-                        stats_delta["container_not_mp4"] += 1
+                    if not file_stats.get("container_is_allowed", True):
+                        stats_delta["container_not_allowed"] += 1
                     stats_delta["subtitle_tracks"] += file_stats.get(
                         "subtitle_tracks", 0
                     )
@@ -230,8 +234,8 @@ def run_scan(
                         issue_callback(file_path, issue)
 
             stats_delta["scanned_files"] += 1
-            if not file_stats.get("container_is_mp4", True):
-                stats_delta["container_not_mp4"] += 1
+            if not file_stats.get("container_is_allowed", True):
+                stats_delta["container_not_allowed"] += 1
             stats_delta["subtitle_tracks"] += file_stats.get("subtitle_tracks", 0)
 
             if file_stats.get("hdr_detected"):
