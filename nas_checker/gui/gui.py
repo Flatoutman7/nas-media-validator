@@ -1,13 +1,3 @@
-"""
-Compatibility wrapper for older imports.
-
-The GUI implementation lives in `nas_checker.gui.gui`.
-"""
-
-from nas_checker.gui.gui import MainWindow  # noqa: F401
-
-__all__ = ["MainWindow"]
-
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,

@@ -1,17 +1,10 @@
-import sys
+"""
+Compatibility wrapper for PyInstaller/spec and older entrypoints.
+"""
 
-from PySide6.QtWidgets import QApplication
-
-from gui import MainWindow
-
-
-def main():
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.resize(800, 600)
-    window.show()
-    sys.exit(app.exec())
+from nas_checker.gui.gui_entry import main  # noqa: F401
 
 
 if __name__ == "__main__":
     main()
+

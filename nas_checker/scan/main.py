@@ -1,15 +1,3 @@
-"""
-Compatibility wrapper for older imports.
-
-The scan runner lives in `nas_checker.scan.main`.
-"""
-
-from nas_checker.scan.main import run_scan  # noqa: F401
-
-
-if __name__ == "__main__":
-    run_scan()
-
 from scanner import scan_folder
 from rules import analyze_file
 from concurrent.futures import ThreadPoolExecutor, as_completed
