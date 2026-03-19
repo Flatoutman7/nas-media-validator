@@ -2,6 +2,7 @@ from scanner import scan_folder
 from rules import analyze_file
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from report import save_report
+from hardware import recommend_scan_workers
 
 MEDIA_FOLDER = "Z:/"
 
@@ -13,6 +14,7 @@ def run_scan(
     issue_callback=None,
     resume_after=None,
     stop_event=None,
+    max_workers=None,
 ):
     """Scan media files and validate them against rules.
 
@@ -53,6 +55,11 @@ def run_scan(
         log(f"Resuming after: {resume_after}")
     log("Checking files...")
 
+    if max_workers is None:
+        max_workers = recommend_scan_workers(path)
+
+    log(f"Parallel workers: {max_workers}")
+
     bad_files = []
     files_processed = 0
     total_discovered = 0
@@ -71,7 +78,7 @@ def run_scan(
     def process_file(file):
         return analyze_file(file)  # (issues, stats)
 
-    executor = ThreadPoolExecutor(max_workers=16)
+    executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = set()
     future_to_index = {}
     shutdown_called = False
