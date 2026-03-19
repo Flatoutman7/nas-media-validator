@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QListWidget,
     QListWidgetItem,
+    QCheckBox,
+    QGroupBox,
 )
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QAction
@@ -32,6 +34,7 @@ from nas_checker.workers.worker import (
     ScanWorker,
     SonarrRedownloadWorker,
     RadarrRedownloadWorker,
+    NetworkMonitorWorker,
 )
 from health.scan_history import ScanHistory
 from health.hardware import get_storage_profile
@@ -164,6 +167,63 @@ class MainWindow(QWidget):
         self.health_custom_date_edit.dateChanged.connect(
             self._on_health_schedule_changed
         )
+
+        # --- Network Performance Monitor (best-effort) ---
+        health_layout.addSpacing(12)
+        health_layout.addWidget(QLabel("Network Performance Monitor"))
+
+        self.net_track_group = QGroupBox("Track:")
+        net_track_layout = QVBoxLayout()
+        self.net_track_read_speed_chk = QCheckBox("Read speed")
+        self.net_track_read_speed_chk.setChecked(True)
+        self.net_track_latency_chk = QCheckBox("Latency")
+        self.net_track_latency_chk.setChecked(True)
+        self.net_track_throughput_chk = QCheckBox("Throughput")
+        self.net_track_throughput_chk.setChecked(True)
+        net_track_layout.addWidget(self.net_track_read_speed_chk)
+        net_track_layout.addWidget(self.net_track_latency_chk)
+        net_track_layout.addWidget(self.net_track_throughput_chk)
+        self.net_track_group.setLayout(net_track_layout)
+        health_layout.addWidget(self.net_track_group)
+
+        self.net_track_read_speed_chk.toggled.connect(self._apply_network_track_visibility)
+        self.net_track_latency_chk.toggled.connect(self._apply_network_track_visibility)
+        self.net_track_throughput_chk.toggled.connect(
+            self._apply_network_track_visibility
+        )
+
+        self.net_measure_button = QPushButton("Measure Network Performance")
+        self.net_measure_button.clicked.connect(self._measure_network_performance)
+        health_layout.addWidget(self.net_measure_button)
+
+        self.net_measure_status_label = QLabel("")
+        health_layout.addWidget(self.net_measure_status_label)
+
+        self.net_read_speed_value_label = QLabel("Read speed: -- MB/s")
+        self.net_latency_value_label = QLabel("Latency: -- ms")
+
+        self.net_throughput_box = QWidget()
+        net_throughput_layout = QVBoxLayout()
+        self.net_throughput_box.setLayout(net_throughput_layout)
+        self.net_throughput_box.setStyleSheet(
+            "background-color: #1f1f1f; border-radius: 6px; padding: 10px;"
+        )
+
+        self.net_throughput_current_label = QLabel("Current: -- MB/s")
+        self.net_throughput_average_label = QLabel("Average: -- MB/s")
+        self.net_throughput_peak_label = QLabel("Peak: -- MB/s")
+        net_throughput_layout.addWidget(self.net_throughput_current_label)
+        net_throughput_layout.addWidget(self.net_throughput_average_label)
+        net_throughput_layout.addWidget(self.net_throughput_peak_label)
+
+        self._apply_network_track_visibility()
+
+        health_layout.addWidget(self.net_read_speed_value_label)
+        health_layout.addWidget(self.net_latency_value_label)
+        health_layout.addWidget(self.net_throughput_box)
+
+        self.net_measure_worker = None
+        self.net_last_network_result = None
 
         health_widget.setLayout(health_layout)
         self.tabs.addTab(health_widget, "NAS Health")
@@ -1221,6 +1281,104 @@ class MainWindow(QWidget):
                 display = next_date.isoformat()
 
         self.health_next_scan_label.setText(f"Next Scan: {display}")
+
+    def _apply_network_track_visibility(self) -> None:
+        # Keep the track selector always visible; hide the metric widgets.
+        self.net_read_speed_value_label.setVisible(
+            self.net_track_read_speed_chk.isChecked()
+        )
+        self.net_latency_value_label.setVisible(self.net_track_latency_chk.isChecked())
+        self.net_throughput_box.setVisible(
+            self.net_track_throughput_chk.isChecked()
+        )
+
+    def _measure_network_performance(self) -> None:
+        if getattr(self, "net_measure_worker", None) and self.net_measure_worker.isRunning():
+            return
+
+        self.net_measure_button.setEnabled(False)
+        self.net_measure_status_label.setText("Measuring network performance...")
+
+        # Best-effort: scan root is currently hardcoded as `Z:/`.
+        self.net_measure_worker = NetworkMonitorWorker("Z:/")
+        self.net_measure_worker.measured.connect(self._on_network_measure_done)
+        self.net_measure_worker.error.connect(self._on_network_measure_error)
+        self.net_measure_worker.start()
+
+    def _on_network_measure_error(self, msg: str) -> None:
+        self.net_measure_button.setEnabled(True)
+        self.net_measure_status_label.setText(f"Network measurement failed: {msg}")
+
+    def _on_network_measure_done(self, result: object) -> None:
+        self.net_measure_button.setEnabled(True)
+
+        if not isinstance(result, dict):
+            self.net_measure_status_label.setText("Network performance measured (unknown format).")
+            return
+
+        self.net_last_network_result = result
+
+        host = result.get("host")
+        latency_ms = result.get("latency_ms")
+        latency_source = result.get("latency_source")
+        file_used = result.get("file_used")
+
+        if host:
+            host_label = str(host)
+        else:
+            host_label = "NAS"
+
+        used_label = ""
+        if file_used:
+            used_label = f" (sample: {os.path.basename(str(file_used))})"
+
+        self.net_measure_status_label.setText(
+            f"Network performance measured for {host_label}{used_label}"
+        )
+
+        # Read speed.
+        if self.net_track_read_speed_chk.isChecked():
+            v = result.get("read_speed_mb_s")
+            if v is None:
+                self.net_read_speed_value_label.setText("Read speed: -- MB/s")
+            else:
+                self.net_read_speed_value_label.setText(
+                    f"Read speed: {float(v):.0f} MB/s"
+                )
+
+        # Latency.
+        if self.net_track_latency_chk.isChecked():
+            if latency_ms is None:
+                self.net_latency_value_label.setText(
+                    f"Latency: -- ms ({host_label} not reachable via ICMP/SMB)"
+                )
+            else:
+                src_txt = latency_source or "latency"
+                try:
+                    latency_txt = f"{float(latency_ms):.1f}"
+                except Exception:
+                    latency_txt = str(latency_ms)
+                self.net_latency_value_label.setText(
+                    f"Latency: {latency_txt} ms ({src_txt})"
+                )
+
+        # Throughput (current/avg/peak).
+        if self.net_track_throughput_chk.isChecked():
+            cur = result.get("throughput_current_mb_s")
+            avg = result.get("throughput_average_mb_s")
+            peak = result.get("throughput_peak_mb_s")
+            cur_txt = "--" if cur is None else f"{float(cur):.0f}"
+            avg_txt = "--" if avg is None else f"{float(avg):.0f}"
+            peak_txt = "--" if peak is None else f"{float(peak):.0f}"
+            self.net_throughput_current_label.setText(
+                f"Current: {cur_txt} MB/s"
+            )
+            self.net_throughput_average_label.setText(
+                f"Average: {avg_txt} MB/s"
+            )
+            self.net_throughput_peak_label.setText(
+                f"Peak: {peak_txt} MB/s"
+            )
 
     def _empty_library_stats_total(self):
         return {
