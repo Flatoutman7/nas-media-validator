@@ -3,6 +3,7 @@ from rules import analyze_file
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from report import save_report
 from hardware import recommend_scan_workers
+from scan_metadata_cache import ScanMetadataCache
 
 MEDIA_FOLDER = "Z:/"
 
@@ -22,6 +23,7 @@ def run_scan(
     """
 
     import time
+    import os
     from concurrent.futures import wait, FIRST_COMPLETED
 
     stats_delta = {
@@ -60,6 +62,10 @@ def run_scan(
 
     log(f"Parallel workers: {max_workers}")
 
+    cache = ScanMetadataCache(db_path=os.path.join(os.path.dirname(__file__), "scan_metadata.db"))
+    cache_hits = 0
+    cache_misses = 0
+
     bad_files = []
     files_processed = 0
     total_discovered = 0
@@ -76,7 +82,7 @@ def run_scan(
     next_resume_index = 0  # first not-yet-completed index
 
     def process_file(file):
-        return analyze_file(file)  # (issues, stats)
+        return cache.analyze_file_cached(file)  # (issues, stats, from_cache)
 
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = set()
@@ -103,7 +109,11 @@ def run_scan(
                 for future in done:
                     idx = future_to_index.pop(future)
                     file_path = index_to_file[idx]
-                    issues, file_stats = future.result()
+                    issues, file_stats, from_cache = future.result()
+                    if from_cache:
+                        cache_hits += 1
+                    else:
+                        cache_misses += 1
 
                     files_processed += 1
                     completed_indices.add(idx)
@@ -201,7 +211,11 @@ def run_scan(
         for future in futures:
             idx = future_to_index.pop(future)
             file_path = index_to_file[idx]
-            issues, file_stats = future.result()
+            issues, file_stats, from_cache = future.result()
+            if from_cache:
+                cache_hits += 1
+            else:
+                cache_misses += 1
 
             files_processed += 1
             completed_indices.add(idx)
@@ -266,6 +280,7 @@ def run_scan(
 
         log("")
         log("Scan complete")
+        log(f"Incremental cache: {cache_hits} hits / {cache_misses} misses")
         log(f"Files with issues: {len(bad_files)}")
 
         save_report(bad_files)

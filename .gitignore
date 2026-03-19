@@ -5,6 +5,7 @@ bad_media_report.csv
 arr_config.json
 scan_history.json
 health_settings.json
+scan_metadata.db
 *.spec
 build/
 dist/
