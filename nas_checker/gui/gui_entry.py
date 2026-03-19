@@ -2,7 +2,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from gui import MainWindow
+from nas_checker.gui.gui import MainWindow
 
 
 def main():

@@ -1,14 +1,14 @@
 from PySide6.QtCore import QThread, Signal
-import main
+from nas_checker.scan import main as scan_main
 import threading
 import os
 import subprocess
 
-from autofix import build_ffmpeg_command
-from arr_config import load_arr_config
-from rules import analyze_file
-from sonarr_client import SonarrClient
-from radarr_client import RadarrClient
+from nas_checker.media.autofix import build_ffmpeg_command
+from nas_checker.arr.arr_config import load_arr_config
+from nas_checker.scan.rules import analyze_file
+from nas_checker.arr.sonarr_client import SonarrClient
+from nas_checker.arr.radarr_client import RadarrClient
 
 
 class ScanWorker(QThread):
@@ -39,7 +39,7 @@ class ScanWorker(QThread):
         def issue_update(file, issue):
             self.issue.emit(file, issue)
 
-        payload = main.run_scan(
+        payload = scan_main.run_scan(
             self.path,
             progress_callback=progress_update,
             log_callback=log_update,
