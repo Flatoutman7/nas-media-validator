@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QProgressBar,
     QLineEdit,
+    QComboBox,
+    QDateEdit,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -15,8 +17,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QAction
+
+from datetime import datetime, timezone, timedelta
+import json
 
 import subprocess
 import os
@@ -28,6 +33,8 @@ from worker import (
     SonarrRedownloadWorker,
     RadarrRedownloadWorker,
 )
+from scan_history import ScanHistory
+from hardware import get_storage_profile
 
 
 class MainWindow(QWidget):
@@ -41,6 +48,8 @@ class MainWindow(QWidget):
         self.auto_fix_worker = None
         self.sonarr_redownload_worker = None
         self.radarr_redownload_worker = None
+        self.current_scan_started_at: datetime | None = None
+        self.scan_history = ScanHistory()
 
         self.setWindowTitle("NAS Media Validator")
 
@@ -63,6 +72,104 @@ class MainWindow(QWidget):
 
         self.tabs.addTab(issues_widget, "Issues")
         self.tabs.addTab(stats_widget, "Library Stats")
+
+        history_widget = QWidget()
+        history_layout = QVBoxLayout()
+
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(5)
+        self.history_table.setHorizontalHeaderLabels(
+            [
+                "Started (UTC)",
+                "Status",
+                "Scanned Files",
+                "Files w/ Issues",
+                "Issues Total",
+            ]
+        )
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.setColumnWidth(0, 200)
+        self.history_table.setColumnWidth(1, 90)
+        self.history_table.setColumnWidth(2, 120)
+        self.history_table.setColumnWidth(3, 120)
+        self.history_table.setColumnWidth(4, 120)
+        self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.history_table.cellDoubleClicked.connect(self.load_scan_from_history)
+
+        history_layout.addWidget(self.history_table)
+        history_widget.setLayout(history_layout)
+
+        self.tabs.addTab(history_widget, "Scan History")
+
+        # --- NAS Health Widget ---
+        health_widget = QWidget()
+        health_layout = QVBoxLayout()
+
+        self.health_title = QLabel("NAS Health")
+        self.health_title.setStyleSheet("font-weight: bold; font-size: 16px;")
+        health_layout.addWidget(self.health_title)
+
+        self.health_ok_progress = QProgressBar()
+        self.health_ok_progress.setRange(0, 100)
+        self.health_ok_progress.setValue(0)
+        self.health_ok_progress.setFormat("%p%")
+        health_layout.addWidget(self.health_ok_progress)
+
+        self.health_ok_label = QLabel("OK%: --")
+        health_layout.addWidget(self.health_ok_label)
+
+        self.health_drive_label = QLabel("Drive: --")
+        self.health_storage_label = QLabel("Storage: --")
+        self.health_read_speed_label = QLabel("Estimated read speed: -- MB/s")
+        self.health_disk_model_label = QLabel("Disk model: --")
+        health_layout.addWidget(self.health_drive_label)
+        health_layout.addWidget(self.health_storage_label)
+        health_layout.addWidget(self.health_read_speed_label)
+        health_layout.addWidget(self.health_disk_model_label)
+
+        self.health_corrupted_label = QLabel("Corrupted Files: --")
+        self.health_unreadable_label = QLabel("Unreadable: --")
+        self.health_unrepairable_label = QLabel("Unrepairable: --")
+        health_layout.addWidget(self.health_corrupted_label)
+        health_layout.addWidget(self.health_unreadable_label)
+        health_layout.addWidget(self.health_unrepairable_label)
+
+        self.health_last_scan_label = QLabel("Last Scan: --")
+        self.health_next_scan_label = QLabel("Next Scan: --")
+        health_layout.addWidget(self.health_last_scan_label)
+        health_layout.addWidget(self.health_next_scan_label)
+
+        # Next scan scheduling controls.
+        health_layout.addWidget(QLabel("Next scan schedule:"))
+        self.health_schedule_type_combo = QComboBox()
+        self.health_schedule_type_combo.addItems(["Daily", "Weekly", "Custom date"])
+        health_layout.addWidget(self.health_schedule_type_combo)
+
+        self.health_weekday_combo = QComboBox()
+        self.health_weekday_combo.addItems(
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        )
+        health_layout.addWidget(self.health_weekday_combo)
+
+        self.health_custom_date_edit = QDateEdit()
+        self.health_custom_date_edit.setCalendarPopup(True)
+        health_layout.addWidget(self.health_custom_date_edit)
+
+        self.health_schedule_type_combo.currentIndexChanged.connect(
+            self._on_health_schedule_changed
+        )
+        self.health_weekday_combo.currentIndexChanged.connect(
+            self._on_health_schedule_changed
+        )
+        self.health_custom_date_edit.dateChanged.connect(
+            self._on_health_schedule_changed
+        )
+
+        health_widget.setLayout(health_layout)
+        self.tabs.addTab(health_widget, "NAS Health")
+
+        self._render_scan_history_table()
+        self._init_health_settings_and_render()
         main_layout.addWidget(self.tabs)
 
         self.label = QLabel("Ready")
@@ -274,6 +381,8 @@ class MainWindow(QWidget):
         self.new_scan_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         is_resume = self.resume_after is not None
+        if not is_resume:
+            self.current_scan_started_at = datetime.now(timezone.utc)
         if not is_resume:
             self.output.clear()
             self.table.setRowCount(0)
@@ -657,6 +766,461 @@ class MainWindow(QWidget):
             for issue in issues:
                 self.output.append("  - " + issue)
             self.output.append("")
+
+        # Persist scan results after a fully completed scan.
+        # If you resumed mid-scan, `payload.bad_files` only covers the last chunk,
+        # so we snapshot the currently accumulated UI table instead.
+        self._persist_completed_scan_to_history()
+        self._render_nas_health_tab_latest()
+
+    def load_scan_from_history(self, row: int, _column: int) -> None:
+        if row < 0:
+            return
+
+        scan_id_item = self.history_table.item(row, 0)
+        if scan_id_item is None:
+            return
+
+        scan_id = scan_id_item.data(Qt.UserRole)
+        if not scan_id:
+            return
+
+        record = self.scan_history.get_scan(scan_id)
+        if not record:
+            return
+
+        self._show_history_record(record)
+
+    def _render_scan_history_table(self) -> None:
+        scans = self.scan_history.scans()
+
+        self.history_table.setRowCount(0)
+        for i, record in enumerate(scans):
+            self.history_table.insertRow(i)
+
+            stats = record.get("stats") or {}
+            scanned_files = stats.get("scanned_files", "")
+            files_with_issues = stats.get("files_with_issues", "")
+            issues_total = record.get("issues_total", "")
+
+            started_at = record.get("started_at", "")
+            completed_at = record.get("completed_at", "")
+            cancelled = bool(record.get("cancelled"))
+            status = "Cancelled" if cancelled else "Complete"
+
+            started_item = QTableWidgetItem(str(started_at))
+            started_item.setData(Qt.UserRole, record.get("id"))
+            started_item.setToolTip(f"Completed: {completed_at}")
+
+            status_item = QTableWidgetItem(status)
+            scanned_item = QTableWidgetItem(str(scanned_files))
+            issues_with_item = QTableWidgetItem(str(files_with_issues))
+            issues_total_item = QTableWidgetItem(str(issues_total))
+
+            self.history_table.setItem(i, 0, started_item)
+            self.history_table.setItem(i, 1, status_item)
+            self.history_table.setItem(i, 2, scanned_item)
+            self.history_table.setItem(i, 3, issues_with_item)
+            self.history_table.setItem(i, 4, issues_total_item)
+
+    def _show_history_record(self, record: dict) -> None:
+        stats = record.get("stats") or {}
+        bad_files = record.get("bad_files") or []
+
+        self.output.clear()
+        self.table.setRowCount(0)
+
+        # Load stats.
+        self.library_stats_total = self._empty_library_stats_total()
+        self._merge_library_stats_delta(stats)
+        self._render_library_stats()
+
+        started_at = record.get("started_at", "")
+        completed_at = record.get("completed_at", "")
+        cancelled = bool(record.get("cancelled"))
+        status = "Cancelled" if cancelled else "Complete"
+
+        self.output.append(
+            f"Loaded scan history: {status}\nStarted: {started_at}\nCompleted: {completed_at}"
+        )
+
+        # Load issues into the existing table.
+        if isinstance(bad_files, list):
+            for entry in bad_files:
+                if not isinstance(entry, dict):
+                    continue
+                file_path = entry.get("file")
+                issues = entry.get("issues") or []
+                if not file_path or not issues:
+                    continue
+
+                for issue in issues:
+                    self.add_issue(file_path, issue)
+
+                self.output.append(str(file_path))
+                for issue in issues:
+                    self.output.append("  - " + str(issue))
+                self.output.append("")
+
+        self._render_nas_health_for_record(record)
+        self.label.setText("Viewing Scan History")
+
+    def _get_table_bad_files_snapshot(self) -> list[dict]:
+        snapshot: list[dict] = []
+        for row in range(self.table.rowCount()):
+            file_item = self.table.item(row, 0)
+            issue_item = self.table.item(row, 1)
+            if file_item is None or issue_item is None:
+                continue
+
+            file_path = file_item.text()
+            issue_text = issue_item.text() or ""
+
+            # `add_issue()` concatenates unique issues with ", ".
+            issues = [s.strip() for s in issue_text.split(",") if s.strip()]
+            snapshot.append({"file": file_path, "issues": issues})
+
+        return snapshot
+
+    def _persist_completed_scan_to_history(self) -> None:
+        # Only persist after a real completion (not when stopped for resume).
+        if not self.library_stats_total:
+            return
+
+        if not self.current_scan_started_at:
+            self.current_scan_started_at = datetime.now(timezone.utc)
+
+        # Build a deep-enough copy so future UI actions don't mutate history objects.
+        stats_copy = json.loads(json.dumps(self.library_stats_total))
+        bad_files_snapshot = self._get_table_bad_files_snapshot()
+
+        issues_total = 0
+        for entry in bad_files_snapshot:
+            issues_total += len(entry.get("issues") or [])
+
+        record = {
+            "started_at": self.current_scan_started_at.isoformat().replace("+00:00", "Z"),
+            "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "cancelled": False,
+            "stats": stats_copy,
+            "bad_files": bad_files_snapshot,
+            "issues_total": issues_total,
+        }
+
+        self.scan_history.add_scan(record)
+        self._render_scan_history_table()
+        self.current_scan_started_at = None
+
+    def _init_health_settings_and_render(self) -> None:
+        self.health_settings_path = os.path.join(
+            os.path.dirname(__file__), "health_settings.json"
+        )
+        self.health_settings = self._load_health_settings()
+        self._active_health_record: dict | None = None
+        self._active_health_anchor_date: datetime | None = None
+
+        # Prevent signal handlers from saving while we apply defaults.
+        self._suppress_health_schedule_save = True
+        try:
+            self._apply_health_settings_to_ui()
+        finally:
+            self._suppress_health_schedule_save = False
+
+        self._render_nas_health_tab_latest()
+        self._render_drive_info_in_nas_health_tab()
+
+    def _load_health_settings(self) -> dict:
+        defaults = {
+            "schedule_type": "Weekly",
+            "weekday": 6,  # Sunday
+            "custom_date": datetime.now(timezone.utc).date().isoformat(),
+        }
+
+        try:
+            if os.path.exists(self.health_settings_path):
+                with open(
+                    self.health_settings_path, "r", encoding="utf-8"
+                ) as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        defaults.update(loaded)
+        except Exception:
+            # Ignore invalid/corrupt settings.
+            pass
+
+        # Validate/clamp.
+        st = defaults.get("schedule_type") or "Weekly"
+        if st not in ("Daily", "Weekly", "Custom date"):
+            st = "Weekly"
+        defaults["schedule_type"] = st
+
+        try:
+            weekday = int(defaults.get("weekday", 6))
+        except Exception:
+            weekday = 6
+        weekday = max(0, min(6, weekday))
+        defaults["weekday"] = weekday
+
+        cd = defaults.get("custom_date")
+        if not isinstance(cd, str) or not cd:
+            cd = datetime.now(timezone.utc).date().isoformat()
+        defaults["custom_date"] = cd
+
+        return defaults
+
+    def _save_health_settings(self) -> None:
+        try:
+            with open(
+                self.health_settings_path, "w", encoding="utf-8"
+            ) as f:
+                json.dump(self.health_settings, f, indent=2)
+        except Exception:
+            pass
+
+    def _apply_health_settings_to_ui(self) -> None:
+        schedule_type = self.health_settings.get("schedule_type", "Weekly")
+
+        idx = self.health_schedule_type_combo.findText(schedule_type)
+        if idx >= 0:
+            self.health_schedule_type_combo.setCurrentIndex(idx)
+
+        weekday_idx = int(self.health_settings.get("weekday", 6))
+        weekday_name = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ][weekday_idx]
+
+        weekday_ui_idx = self.health_weekday_combo.findText(weekday_name)
+        if weekday_ui_idx >= 0:
+            self.health_weekday_combo.setCurrentIndex(weekday_ui_idx)
+
+        cd = self.health_settings.get("custom_date")
+        if isinstance(cd, str):
+            qd = QDate.fromString(cd, "yyyy-MM-dd")
+            if qd.isValid():
+                self.health_custom_date_edit.setDate(qd)
+
+        self.health_weekday_combo.setVisible(schedule_type == "Weekly")
+        self.health_custom_date_edit.setVisible(schedule_type == "Custom date")
+
+    def _weekday_name_to_index(self, weekday_name: str) -> int:
+        names = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ]
+        try:
+            return names.index(weekday_name)
+        except ValueError:
+            return 6
+
+    def _on_health_schedule_changed(self) -> None:
+        if getattr(self, "_suppress_health_schedule_save", False):
+            return
+
+        schedule_type = self.health_schedule_type_combo.currentText()
+        self.health_settings["schedule_type"] = schedule_type
+
+        if schedule_type == "Weekly":
+            self.health_settings["weekday"] = self._weekday_name_to_index(
+                self.health_weekday_combo.currentText()
+            )
+
+        if schedule_type == "Custom date":
+            self.health_settings["custom_date"] = (
+                self.health_custom_date_edit.date().toString("yyyy-MM-dd")
+            )
+
+        self.health_weekday_combo.setVisible(schedule_type == "Weekly")
+        self.health_custom_date_edit.setVisible(schedule_type == "Custom date")
+
+        self._save_health_settings()
+        self._recalculate_next_scan_label()
+
+    def _parse_history_iso_datetime_utc(self, s: str | None) -> datetime | None:
+        if not s or not isinstance(s, str):
+            return None
+        try:
+            # We store timestamps as "...Z" for UTC.
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _get_latest_history_record(self) -> dict | None:
+        scans = self.scan_history.scans()
+        return scans[0] if scans else None
+
+    def _render_nas_health_tab_latest(self) -> None:
+        record = self._get_latest_history_record()
+        if record:
+            self._render_nas_health_for_record(record)
+        else:
+            self._active_health_record = None
+            self._active_health_anchor_date = None
+            self.health_ok_progress.setValue(0)
+            self.health_ok_label.setText("OK%: --")
+            self.health_corrupted_label.setText("Corrupted Files: --")
+            self.health_unreadable_label.setText("Unreadable: --")
+            self.health_unrepairable_label.setText("Unrepairable: --")
+            self.health_last_scan_label.setText("Last Scan: --")
+            self.health_next_scan_label.setText("Next Scan: --")
+
+    def _render_drive_info_in_nas_health_tab(self) -> None:
+        # Your scanner root is currently hardcoded as `Z:/`.
+        # If you add a path selector later, we can make this dynamic.
+        try:
+            profile = get_storage_profile("Z:/")
+            drive_type = profile.get("drive_type") or "unknown"
+            drive_letter = profile.get("drive_letter") or "-"
+            storage_class = profile.get("storage_class") or "unknown"
+            estimated = profile.get("estimated_read_mb_s")
+            disk_model = profile.get("disk_model") or ""
+
+            self.health_drive_label.setText(f"Drive: {drive_letter}: ({drive_type})")
+            self.health_storage_label.setText(f"Storage: {storage_class}")
+            if estimated:
+                # Match common vendor-spec units:
+                # - NVMe is often advertised in GB/s
+                # - SATA SSD/HDD are often advertised in MB/s
+                if storage_class == "nvme":
+                    estimated_gb_s = float(estimated) / 1024.0
+                    self.health_read_speed_label.setText(
+                        f"Estimated read speed: {estimated_gb_s:.2f} GB/s"
+                    )
+                else:
+                    self.health_read_speed_label.setText(
+                        f"Estimated read speed: {int(estimated)} MB/s"
+                    )
+            else:
+                self.health_read_speed_label.setText("Estimated read speed: -- MB/s")
+
+            if disk_model.strip():
+                self.health_disk_model_label.setText(f"Disk model: {disk_model.strip()}")
+            else:
+                self.health_disk_model_label.setText("Disk model: --")
+        except Exception:
+            self.health_drive_label.setText("Drive: --")
+            self.health_storage_label.setText("Storage: --")
+            self.health_read_speed_label.setText("Estimated read speed: -- MB/s")
+            self.health_disk_model_label.setText("Disk model: --")
+
+    def _render_nas_health_for_record(self, record: dict) -> None:
+        self._active_health_record = record
+
+        stats = record.get("stats") or {}
+        scanned_files = int(stats.get("scanned_files") or 0)
+        files_with_issues = int(stats.get("files_with_issues") or 0)
+
+        bad_files = record.get("bad_files") or []
+        corrupted = 0
+        unreadable = 0
+        unrepairable = 0
+
+        # Prefer category counts from the per-file issue lists so they don't overlap
+        # awkwardly. This is especially important for "Unrepairable" meaning
+        # "must be redownloaded".
+        if isinstance(bad_files, list) and bad_files:
+            for entry in bad_files:
+                if not isinstance(entry, dict):
+                    continue
+                issues = entry.get("issues") or []
+                if not isinstance(issues, list):
+                    continue
+
+                if "File suspiciously small" in issues:
+                    corrupted += 1
+                if "Could not read media info" in issues:
+                    unreadable += 1
+                if "No video stream found" in issues or "No audio stream found" in issues:
+                    unrepairable += 1
+        else:
+            # Fallback to the aggregated stats counters.
+            corrupted = int(stats.get("small_files") or 0)
+            unreadable = int(stats.get("media_info_errors") or 0)
+            unrepairable = max(files_with_issues - corrupted - unreadable, 0)
+
+        if scanned_files > 0:
+            ok_count = max(scanned_files - files_with_issues, 0)
+            ok_pct = (ok_count / scanned_files) * 100.0
+            self.health_ok_progress.setValue(int(round(ok_pct)))
+            self.health_ok_label.setText(f"OK%: {ok_pct:.1f}% files OK")
+        else:
+            self.health_ok_progress.setValue(0)
+            self.health_ok_label.setText("OK%: --")
+
+        self.health_corrupted_label.setText(f"Corrupted Files: {corrupted}")
+        self.health_unreadable_label.setText(f"Unreadable: {unreadable}")
+        self.health_unrepairable_label.setText(
+            f"Unrepairable: {unrepairable}"
+        )
+
+        completed_at = record.get("completed_at")
+        completed_dt = self._parse_history_iso_datetime_utc(completed_at)
+        started_at = record.get("started_at")
+        started_dt = self._parse_history_iso_datetime_utc(started_at)
+
+        anchor_dt = completed_dt or started_dt
+        if anchor_dt:
+            self._active_health_anchor_date = anchor_dt
+            self.health_last_scan_label.setText(
+                f"Last Scan: {anchor_dt.date().isoformat()}"
+            )
+        else:
+            self._active_health_anchor_date = None
+            self.health_last_scan_label.setText("Last Scan: --")
+
+        self._recalculate_next_scan_label()
+
+    def _recalculate_next_scan_label(self) -> None:
+        if not getattr(self, "_active_health_anchor_date", None):
+            self.health_next_scan_label.setText("Next Scan: --")
+            return
+
+        schedule_type = self.health_schedule_type_combo.currentText()
+
+        anchor_date = self._active_health_anchor_date.date()
+        today_utc = datetime.now(timezone.utc).date()
+
+        if schedule_type == "Daily":
+            next_date = anchor_date + timedelta(days=1)
+        elif schedule_type == "Weekly":
+            target_weekday = self._weekday_name_to_index(
+                self.health_weekday_combo.currentText()
+            )
+            offset = (target_weekday - anchor_date.weekday()) % 7
+            if offset == 0:
+                offset = 7  # always pick a future scan
+            next_date = anchor_date + timedelta(days=offset)
+        else:
+            # Custom date
+            cd = self.health_custom_date_edit.date().toString("yyyy-MM-dd")
+            qd = QDate.fromString(cd, "yyyy-MM-dd")
+            next_date = (
+                datetime(qd.year(), qd.month(), qd.day()).date()
+                if qd.isValid()
+                else anchor_date
+            )
+
+        if next_date == today_utc:
+            display = "Today"
+        elif next_date == today_utc + timedelta(days=1):
+            display = "Tomorrow"
+        else:
+            if schedule_type == "Weekly":
+                display = next_date.strftime("%A")
+            else:
+                display = next_date.isoformat()
+
+        self.health_next_scan_label.setText(f"Next Scan: {display}")
 
     def _empty_library_stats_total(self):
         return {
