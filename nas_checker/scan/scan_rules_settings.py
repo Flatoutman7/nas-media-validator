@@ -3,12 +3,19 @@ import json
 import os
 from typing import Any
 
-
 DEFAULT_SCAN_RULES_SETTINGS: dict[str, Any] = {
     # Extensions without the leading dot.
     "containers": ["mp4"],
     "video_codecs": ["hevc"],
     "audio_codecs": ["aac"],
+    "min_file_size_bytes": 1_000_000,
+    "check_subtitles": True,
+    "check_hdr": True,
+    "check_tenbit_h264": True,
+    "check_multiple_audio": True,
+    "check_multiple_subtitle": True,
+    "check_multiple_commentary": True,
+    "check_wrong_resolution": True,
 }
 
 
@@ -36,6 +43,28 @@ def _normalize_list_csv(values: list[str] | None) -> list[str]:
     return uniq
 
 
+def _normalize_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _normalize_min_file_size(value: Any) -> int:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = DEFAULT_SCAN_RULES_SETTINGS["min_file_size_bytes"]
+    return max(0, size)
+
+
 def normalize_scan_rules_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_SCAN_RULES_SETTINGS)
     if not isinstance(settings, dict):
@@ -51,6 +80,21 @@ def normalize_scan_rules_settings(settings: dict[str, Any] | None) -> dict[str, 
         merged["video_codecs"] = video_codecs
     if audio_codecs:
         merged["audio_codecs"] = audio_codecs
+
+    merged["min_file_size_bytes"] = _normalize_min_file_size(
+        settings.get("min_file_size_bytes", merged["min_file_size_bytes"])
+    )
+    for key in (
+        "check_subtitles",
+        "check_hdr",
+        "check_tenbit_h264",
+        "check_multiple_audio",
+        "check_multiple_subtitle",
+        "check_multiple_commentary",
+        "check_wrong_resolution",
+    ):
+        merged[key] = _normalize_bool(settings.get(key), bool(merged[key]))
+
     return merged
 
 
@@ -93,4 +137,3 @@ def save_scan_rules_settings(settings: dict[str, Any], path: str | None = None) 
     except Exception:
         # Best-effort; don't crash the app if disk is read-only.
         pass
-

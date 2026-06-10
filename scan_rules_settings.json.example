@@ -1,0 +1,13 @@
+{
+  "containers": ["mp4"],
+  "video_codecs": ["hevc"],
+  "audio_codecs": ["aac"],
+  "min_file_size_bytes": 1000000,
+  "check_subtitles": true,
+  "check_hdr": true,
+  "check_tenbit_h264": true,
+  "check_multiple_audio": true,
+  "check_multiple_subtitle": true,
+  "check_multiple_commentary": true,
+  "check_wrong_resolution": true
+}

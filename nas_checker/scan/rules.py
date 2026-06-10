@@ -3,13 +3,62 @@ import json
 import os
 import re
 
-MIN_FILE_SIZE_BYTES = 1_000_000
+from nas_checker.scan.issues import (
+    ISSUE_AUDIO_CODEC_NOT_ALLOWED,
+    ISSUE_CONTAINER_NOT_ALLOWED,
+    ISSUE_FILE_SMALL,
+    ISSUE_HDR_DETECTED,
+    ISSUE_MEDIA_INFO_ERROR,
+    ISSUE_MULTIPLE_AUDIO,
+    ISSUE_MULTIPLE_COMMENTARY,
+    ISSUE_MULTIPLE_SUBTITLE,
+    ISSUE_NO_AUDIO,
+    ISSUE_NO_VIDEO,
+    ISSUE_PGS_SUBTITLES,
+    ISSUE_SUBTITLE_TRACK,
+    ISSUE_TENBIT_H264,
+    ISSUE_TEXT_SUBTITLES,
+    ISSUE_VIDEO_CODEC_NOT_ALLOWED,
+    ISSUE_WRONG_RESOLUTION,
+    make_issue,
+    normalize_issues,
+)
 
 
-def check_min_file_size(file):
+def _rule_bool(rules_settings, key: str, default: bool = True) -> bool:
+    if not isinstance(rules_settings, dict):
+        return default
+    value = rules_settings.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _min_file_size_bytes(rules_settings) -> int:
+    default = 1_000_000
+    if not isinstance(rules_settings, dict):
+        return default
+    try:
+        return max(0, int(rules_settings.get("min_file_size_bytes", default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def check_min_file_size(file, rules_settings=None):
     """Flag files that are unexpectedly small (often incomplete or corrupt)."""
-    if os.path.getsize(file) < MIN_FILE_SIZE_BYTES:
-        return ["File suspiciously small"]
+    threshold = _min_file_size_bytes(rules_settings)
+    if threshold <= 0:
+        return []
+    if os.path.getsize(file) < threshold:
+        return [make_issue(ISSUE_FILE_SMALL, "File suspiciously small")]
     return []
 
 
@@ -28,15 +77,29 @@ def get_media_info(file):
         creationflags=creationflags,
     )
 
-    return json.loads(result.stdout)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        snippet = stderr[:200] if stderr else f"exit code {result.returncode}"
+        raise RuntimeError(f"ffprobe failed: {snippet}")
+
+    stdout = (result.stdout or "").strip()
+    if not stdout:
+        raise RuntimeError("ffprobe returned empty output")
+
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe returned invalid JSON: {exc}") from exc
 
 
 def analyze_file(file, rules_settings=None):
     """Return (issues, stats) for a file using a single ffprobe call.
 
-    `issues` is the list of validation problems, and `stats` contains per-file
-    stream/container facts for building library-wide statistics.
+    `issues` is the list of structured validation problems, and `stats` contains
+    per-file stream/container facts for building library-wide statistics.
     """
+
+    file = os.fspath(file)
 
     stats = {
         "container_is_mp4": file.lower().endswith(".mp4"),
@@ -70,8 +133,8 @@ def analyze_file(file, rules_settings=None):
     }
 
     issues = []
-    issues.extend(check_min_file_size(file))
-    if issues and issues[0] == "File suspiciously small":
+    issues.extend(check_min_file_size(file, rules_settings=rules_settings))
+    if issues and issues[0].get("code") == ISSUE_FILE_SMALL:
         stats["min_file_size_issue"] = True
 
     # check container
@@ -99,10 +162,17 @@ def analyze_file(file, rules_settings=None):
             # If settings are invalid, fall back to defaults.
             pass
 
-    container_ext = stats.get("container_ext") or os.path.splitext(file)[1].lower().lstrip(".")
+    container_ext = stats.get("container_ext") or os.path.splitext(file)[
+        1
+    ].lower().lstrip(".")
     stats["container_is_allowed"] = container_ext in allowed_containers
     if not stats["container_is_allowed"]:
-        issues.append(f"Container is not allowed: {container_ext}")
+        issues.append(
+            make_issue(
+                ISSUE_CONTAINER_NOT_ALLOWED,
+                f"Container is not allowed: {container_ext}",
+            )
+        )
 
     def parse_rational(value):
         if not value:
@@ -137,8 +207,13 @@ def analyze_file(file, rules_settings=None):
 
     try:
         info = get_media_info(file)
-    except Exception:
-        issues.append("Could not read media info")
+    except Exception as exc:
+        issues.append(
+            make_issue(
+                ISSUE_MEDIA_INFO_ERROR,
+                f"Could not read media info: {exc}",
+            )
+        )
         stats["media_info_error"] = True
         return issues, stats
 
@@ -183,14 +258,24 @@ def analyze_file(file, rules_settings=None):
                     stats["hdr_detected"] = True
 
             if codec_name.lower() not in allowed_video_codecs:
-                issues.append(f"Video codec is {codec_name}, not allowed")
+                issues.append(
+                    make_issue(
+                        ISSUE_VIDEO_CODEC_NOT_ALLOWED,
+                        f"Video codec is {codec_name}, not allowed",
+                    )
+                )
 
         elif codec_type == "audio":
             stats["audio_found"] = True
             stats["audio_track_count"] += 1
             stats["audio_codecs"].append(codec_name)
             if codec_name.lower() not in allowed_audio_codecs:
-                issues.append(f"Audio codec is {codec_name}, not allowed")
+                issues.append(
+                    make_issue(
+                        ISSUE_AUDIO_CODEC_NOT_ALLOWED,
+                        f"Audio codec is {codec_name}, not allowed",
+                    )
+                )
 
             commentary = bool(disposition.get("commentary", 0))
             title = (tags.get("title") or "").lower()
@@ -210,61 +295,87 @@ def analyze_file(file, rules_settings=None):
                 stats["pgs_subtitles_detected"] = True
 
     if not stats["video_found"]:
-        issues.append("No video stream found")
+        issues.append(make_issue(ISSUE_NO_VIDEO, "No video stream found"))
 
     if not stats["audio_found"]:
-        issues.append("No audio stream found")
+        issues.append(make_issue(ISSUE_NO_AUDIO, "No audio stream found"))
 
-    if stats["subtitle_tracks"] > 0:
-        issues.append("Subtitle track detected")
+    if stats["subtitle_tracks"] > 0 and _rule_bool(
+        rules_settings, "check_subtitles", True
+    ):
+        issues.append(make_issue(ISSUE_SUBTITLE_TRACK, "Subtitle track detected"))
 
     # Derived issue checks:
-    if stats.get("hdr_detected"):
+    if stats.get("hdr_detected") and _rule_bool(rules_settings, "check_hdr", True):
         stats["hdr_detected_issue"] = True
-        issues.append("HDR detected")
+        issues.append(make_issue(ISSUE_HDR_DETECTED, "HDR detected"))
 
-    if stats.get("audio_track_count", 0) > 1:
+    if stats.get("audio_track_count", 0) > 1 and _rule_bool(
+        rules_settings, "check_multiple_audio", True
+    ):
         stats["multiple_audio_tracks_issue"] = True
-        issues.append("Multiple audio tracks detected")
+        issues.append(
+            make_issue(ISSUE_MULTIPLE_AUDIO, "Multiple audio tracks detected")
+        )
 
     if (
         stats["bit_depth"] is not None
         and video_primary_codec is not None
         and video_primary_codec.lower().startswith("h264")
         and stats["bit_depth"] >= 10
+        and _rule_bool(rules_settings, "check_tenbit_h264", True)
     ):
         stats["tenbit_h264_issue"] = True
-        issues.append("10bit H.264 (bad for Plex)")
+        issues.append(make_issue(ISSUE_TENBIT_H264, "10bit H.264 (bad for Plex)"))
 
-    if stats["pgs_subtitles_detected"]:
-        issues.append("PGS subtitles detected")
+    if stats["pgs_subtitles_detected"] and _rule_bool(
+        rules_settings, "check_subtitles", True
+    ):
+        issues.append(make_issue(ISSUE_PGS_SUBTITLES, "PGS subtitles detected"))
 
-    if stats["subtitle_tracks"] > 1:
+    if stats["subtitle_tracks"] > 1 and _rule_bool(
+        rules_settings, "check_multiple_subtitle", True
+    ):
         stats["multiple_subtitle_tracks_issue"] = True
-        issues.append("Multiple subtitle tracks detected")
-
-    if stats["subtitle_tracks"] > 0 and not stats["pgs_subtitles_detected"]:
-        stats["text_subtitles_detected"] = True
-        issues.append("Text subtitles detected")
-
-    if stats["commentary_track_count"] > 1:
-        stats["multiple_commentary_issue"] = True
-        issues.append("Multiple commentary tracks detected")
+        issues.append(
+            make_issue(ISSUE_MULTIPLE_SUBTITLE, "Multiple subtitle tracks detected")
+        )
 
     if (
-        stats["expected_resolution_height"] is not None
+        stats["subtitle_tracks"] > 0
+        and not stats["pgs_subtitles_detected"]
+        and _rule_bool(rules_settings, "check_subtitles", True)
+    ):
+        stats["text_subtitles_detected"] = True
+        issues.append(make_issue(ISSUE_TEXT_SUBTITLES, "Text subtitles detected"))
+
+    if stats["commentary_track_count"] > 1 and _rule_bool(
+        rules_settings, "check_multiple_commentary", True
+    ):
+        stats["multiple_commentary_issue"] = True
+        issues.append(
+            make_issue(ISSUE_MULTIPLE_COMMENTARY, "Multiple commentary tracks detected")
+        )
+
+    if (
+        _rule_bool(rules_settings, "check_wrong_resolution", True)
+        and stats["expected_resolution_height"] is not None
         and stats["video_height"] is not None
         and int(stats["expected_resolution_height"]) != int(stats["video_height"])
     ):
         stats["wrong_resolution_issue"] = True
         issues.append(
-            f"Wrong resolution: expected {stats['expected_resolution_height']}p, found {stats['video_height']}p"
+            make_issue(
+                ISSUE_WRONG_RESOLUTION,
+                f"Wrong resolution: expected {stats['expected_resolution_height']}p, "
+                f"found {stats['video_height']}p",
+            )
         )
 
     return issues, stats
 
 
-def check_file(file):
+def check_file(file, rules_settings=None):
     """Validate a media file against your rules and return a list of issues."""
-    issues, _stats = analyze_file(file)
-    return issues
+    issues, _stats = analyze_file(file, rules_settings=rules_settings)
+    return normalize_issues(issues)
