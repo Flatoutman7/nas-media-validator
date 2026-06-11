@@ -24,6 +24,12 @@ from nas_checker.scan.issues import (
     normalize_issues,
 )
 
+COMMON_RESOLUTION_HEIGHTS = (360, 480, 576, 720, 1080, 1440, 2160, 4320)
+_RESOLUTION_TOKEN_RE = re.compile(
+    rf"(?<![a-z0-9])({'|'.join(str(h) for h in COMMON_RESOLUTION_HEIGHTS)})p(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
 
 def _rule_bool(rules_settings, key: str, default: bool = True) -> bool:
     if not isinstance(rules_settings, dict):
@@ -138,9 +144,9 @@ def analyze_file(file, rules_settings=None):
         stats["min_file_size_issue"] = True
 
     # check container
-    allowed_containers = {"mp4"}
-    allowed_video_codecs = {"hevc"}
-    allowed_audio_codecs = {"aac"}
+    allowed_containers = {"mp4", "mkv"}
+    allowed_video_codecs = {"hevc", "h264"}
+    allowed_audio_codecs = {"aac", "ac3", "eac3"}
     if isinstance(rules_settings, dict):
         try:
             allowed_containers = {
@@ -192,16 +198,11 @@ def analyze_file(file, rules_settings=None):
             return None
 
     def expected_resolution_height_from_filename(path):
-        base = os.path.basename(path).lower()
-        # Common patterns: 1080p / 720p / 2160p
-        m = re.search(r"(\d{3,4})p", base)
+        base = os.path.basename(path)
+        m = _RESOLUTION_TOKEN_RE.search(base)
         if not m:
             return None
-        try:
-            h = int(m.group(1))
-        except Exception:
-            return None
-        return h
+        return int(m.group(1))
 
     stats["expected_resolution_height"] = expected_resolution_height_from_filename(file)
 
@@ -301,17 +302,17 @@ def analyze_file(file, rules_settings=None):
         issues.append(make_issue(ISSUE_NO_AUDIO, "No audio stream found"))
 
     if stats["subtitle_tracks"] > 0 and _rule_bool(
-        rules_settings, "check_subtitles", True
+        rules_settings, "check_subtitles", False
     ):
         issues.append(make_issue(ISSUE_SUBTITLE_TRACK, "Subtitle track detected"))
 
     # Derived issue checks:
-    if stats.get("hdr_detected") and _rule_bool(rules_settings, "check_hdr", True):
+    if stats.get("hdr_detected") and _rule_bool(rules_settings, "check_hdr", False):
         stats["hdr_detected_issue"] = True
         issues.append(make_issue(ISSUE_HDR_DETECTED, "HDR detected"))
 
     if stats.get("audio_track_count", 0) > 1 and _rule_bool(
-        rules_settings, "check_multiple_audio", True
+        rules_settings, "check_multiple_audio", False
     ):
         stats["multiple_audio_tracks_issue"] = True
         issues.append(
@@ -329,12 +330,12 @@ def analyze_file(file, rules_settings=None):
         issues.append(make_issue(ISSUE_TENBIT_H264, "10bit H.264 (bad for Plex)"))
 
     if stats["pgs_subtitles_detected"] and _rule_bool(
-        rules_settings, "check_subtitles", True
+        rules_settings, "check_subtitles", False
     ):
         issues.append(make_issue(ISSUE_PGS_SUBTITLES, "PGS subtitles detected"))
 
     if stats["subtitle_tracks"] > 1 and _rule_bool(
-        rules_settings, "check_multiple_subtitle", True
+        rules_settings, "check_multiple_subtitle", False
     ):
         stats["multiple_subtitle_tracks_issue"] = True
         issues.append(
@@ -344,7 +345,7 @@ def analyze_file(file, rules_settings=None):
     if (
         stats["subtitle_tracks"] > 0
         and not stats["pgs_subtitles_detected"]
-        and _rule_bool(rules_settings, "check_subtitles", True)
+        and _rule_bool(rules_settings, "check_subtitles", False)
     ):
         stats["text_subtitles_detected"] = True
         issues.append(make_issue(ISSUE_TEXT_SUBTITLES, "Text subtitles detected"))

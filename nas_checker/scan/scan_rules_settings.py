@@ -5,15 +5,15 @@ from typing import Any
 
 DEFAULT_SCAN_RULES_SETTINGS: dict[str, Any] = {
     # Extensions without the leading dot.
-    "containers": ["mp4"],
-    "video_codecs": ["hevc"],
-    "audio_codecs": ["aac"],
+    "containers": ["mp4", "mkv"],
+    "video_codecs": ["hevc", "h264"],
+    "audio_codecs": ["aac", "ac3", "eac3"],
     "min_file_size_bytes": 1_000_000,
-    "check_subtitles": True,
-    "check_hdr": True,
+    "check_subtitles": False,
+    "check_hdr": False,
     "check_tenbit_h264": True,
-    "check_multiple_audio": True,
-    "check_multiple_subtitle": True,
+    "check_multiple_audio": False,
+    "check_multiple_subtitle": False,
     "check_multiple_commentary": True,
     "check_wrong_resolution": True,
 }

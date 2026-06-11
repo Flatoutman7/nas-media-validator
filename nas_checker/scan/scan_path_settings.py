@@ -6,6 +6,15 @@ DEFAULT_MEDIA_FOLDER = "Z:/"
 SCAN_PATH_ENV_VAR = "NAS_SCAN_PATH"
 DEFAULT_AUTO_WORKERS = True
 DEFAULT_MANUAL_WORKERS = 4
+AUTO_FIX_MODE_OFF = "off"
+AUTO_FIX_MODE_PROMPT = "prompt"
+AUTO_FIX_MODE_AUTO_RUN = "auto_run"
+DEFAULT_AUTO_FIX_MODE = AUTO_FIX_MODE_OFF
+AUTO_FIX_MODES = {
+    AUTO_FIX_MODE_OFF,
+    AUTO_FIX_MODE_PROMPT,
+    AUTO_FIX_MODE_AUTO_RUN,
+}
 MEASURED_READ_MB_S_KEY = "measured_read_mb_s"
 EFFECTIVE_READ_MB_S_KEY = "effective_read_mb_s"
 RAW_MEASURED_READ_MB_S_KEY = "raw_measured_read_mb_s"
@@ -27,6 +36,11 @@ def get_default_scan_path_settings_path() -> str:
     return os.path.join(gui_dir, "gui", "scan_path_settings.json")
 
 
+def normalize_auto_fix_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in AUTO_FIX_MODES else DEFAULT_AUTO_FIX_MODE
+
+
 def load_scan_path_settings(path: str | None = None) -> dict[str, Any]:
     if not path:
         path = get_default_scan_path_settings_path()
@@ -34,6 +48,7 @@ def load_scan_path_settings(path: str | None = None) -> dict[str, Any]:
         "media_folder": DEFAULT_MEDIA_FOLDER,
         "auto_workers": DEFAULT_AUTO_WORKERS,
         "manual_workers": DEFAULT_MANUAL_WORKERS,
+        "auto_fix_mode": DEFAULT_AUTO_FIX_MODE,
         MEASURED_READ_MB_S_KEY: None,
         EFFECTIVE_READ_MB_S_KEY: None,
         RAW_MEASURED_READ_MB_S_KEY: None,
@@ -51,6 +66,7 @@ def load_scan_path_settings(path: str | None = None) -> dict[str, Any]:
 
     defaults["media_folder"] = normalize_scan_path(defaults.get("media_folder"))
     defaults["auto_workers"] = bool(defaults.get("auto_workers", DEFAULT_AUTO_WORKERS))
+    defaults["auto_fix_mode"] = normalize_auto_fix_mode(defaults.get("auto_fix_mode"))
     try:
         manual_workers = int(defaults.get("manual_workers", DEFAULT_MANUAL_WORKERS))
     except Exception:
@@ -93,6 +109,10 @@ def save_scan_path_settings(settings: dict[str, Any], path: str | None = None) -
         except Exception:
             manual_workers = DEFAULT_MANUAL_WORKERS
         payload["manual_workers"] = max(1, min(64, manual_workers))
+    if "auto_fix_mode" in settings:
+        payload["auto_fix_mode"] = normalize_auto_fix_mode(
+            settings.get("auto_fix_mode")
+        )
     if MEASURED_READ_MB_S_KEY in settings:
         measured_read = settings.get(MEASURED_READ_MB_S_KEY)
         try:

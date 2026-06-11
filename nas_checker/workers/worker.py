@@ -5,7 +5,7 @@ import os
 import subprocess
 
 from nas_checker.media.autofix import backup_original_file, build_ffmpeg_command
-from nas_checker.arr.arr_config import load_arr_config
+from nas_checker.arr.arr_config import load_arr_config, validate_arr_service_config
 from nas_checker.scan.issues import issue_message, normalize_issues
 from nas_checker.scan.rules import analyze_file
 from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
@@ -79,6 +79,41 @@ class ReadSpeedBenchmarkWorker(QThread):
             kwargs["sample_count"] = self.sample_count
         result = measure_read_throughput(self.path, **kwargs)
         self.finished.emit(result)
+
+
+class ArrConnectionTestWorker(QThread):
+    finished = Signal(str, bool)
+
+    def __init__(self, service: str, base_url: str, api_key: str):
+        super().__init__()
+        self.service = service
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self):
+        service_config = {
+            "enabled": True,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+        }
+        config_errors = validate_arr_service_config(self.service, service_config)
+        label = self.service.capitalize()
+        if config_errors:
+            self.finished.emit(" ".join(config_errors), False)
+            return
+
+        try:
+            if self.service == "sonarr":
+                client = SonarrClient(base_url=self.base_url, api_key=self.api_key)
+            else:
+                client = RadarrClient(base_url=self.base_url, api_key=self.api_key)
+            status = client._get("/api/v3/system/status")
+            version = ""
+            if isinstance(status, dict) and status.get("version"):
+                version = f" ({status['version']})"
+            self.finished.emit(f"{label} connection OK{version}.", True)
+        except Exception as exc:
+            self.finished.emit(f"{label} connection failed: {exc}", False)
 
 
 class AutoFixWorker(QThread):
@@ -195,15 +230,15 @@ class SonarrRedownloadWorker(QThread):
             self.finished.emit("Sonarr missing config.")
             return
 
-        base_url = sonarr_cfg.get("base_url")
-        api_key = sonarr_cfg.get("api_key")
-        if not base_url or not api_key:
-            self.log.emit(
-                "Sonarr config incomplete. `base_url` and `api_key` are required."
-            )
+        config_errors = validate_arr_service_config("sonarr", sonarr_cfg)
+        if config_errors:
+            for error in config_errors:
+                self.log.emit(error)
             self.finished.emit("Sonarr config incomplete.")
             return
 
+        base_url = sonarr_cfg.get("base_url")
+        api_key = sonarr_cfg.get("api_key")
         client = SonarrClient(base_url=base_url, api_key=api_key)
         self.log.emit(f"Sonarr: looking up series for '{self.series_term}'...")
         series_id = client.find_series_id(self.series_term)
@@ -238,15 +273,15 @@ class RadarrRedownloadWorker(QThread):
             self.finished.emit("Radarr missing config.")
             return
 
-        base_url = radarr_cfg.get("base_url")
-        api_key = radarr_cfg.get("api_key")
-        if not base_url or not api_key:
-            self.log.emit(
-                "Radarr config incomplete. `base_url` and `api_key` are required."
-            )
+        config_errors = validate_arr_service_config("radarr", radarr_cfg)
+        if config_errors:
+            for error in config_errors:
+                self.log.emit(error)
             self.finished.emit("Radarr config incomplete.")
             return
 
+        base_url = radarr_cfg.get("base_url")
+        api_key = radarr_cfg.get("api_key")
         client = RadarrClient(base_url=base_url, api_key=api_key)
         self.log.emit(f"Radarr: looking up movie for '{self.movie_term}'...")
         movie_id = client.find_movie_id(self.movie_term)

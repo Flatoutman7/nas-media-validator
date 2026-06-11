@@ -54,10 +54,12 @@ Use **Test Read Speed** there to run a read-only NAS throughput benchmark; Auto 
 
 ### Rule toggles (Scan Settings)
 
-- Minimum file size threshold
-- Flag subtitles, HDR, 10-bit H.264
-- Multiple audio / subtitle / commentary tracks
-- Wrong resolution vs filename (`1080p` in name)
+- Default allowed containers: `mp4`, `mkv`
+- Default allowed video codecs: `hevc`, `h264`
+- Default allowed audio codecs: `aac`, `ac3`, `eac3`
+- Minimum file size threshold: 1,000,000 bytes
+- Default-on checks: 10-bit H.264, multiple commentary tracks, wrong resolution vs filename (`1080p` in name)
+- Default-off checks: subtitles, HDR, multiple audio tracks, multiple subtitle tracks
 
 Changing rules invalidates the incremental cache via a rules hash.
 

@@ -38,7 +38,7 @@ HEVC_AAC_MP4_STREAMS = {
     ]
 }
 
-H264_AAC_MKV_STREAMS = {
+H264_AAC_AVI_STREAMS = {
     "streams": [
         {
             "codec_type": "video",
@@ -88,11 +88,11 @@ class AnalyzeFileTests(unittest.TestCase):
 
     @patch("nas_checker.scan.rules.get_media_info")
     def test_analyze_file_flags_disallowed_container(self, mock_get_media_info):
-        mkv_path = os.path.join(self.temp_dir.name, "sample.mkv")
-        with open(mkv_path, "wb") as handle:
+        avi_path = os.path.join(self.temp_dir.name, "sample.avi")
+        with open(avi_path, "wb") as handle:
             handle.write(b"\x00" * 2_000_000)
-        mock_get_media_info.return_value = H264_AAC_MKV_STREAMS
-        issues, stats = analyze_file(mkv_path)
+        mock_get_media_info.return_value = H264_AAC_AVI_STREAMS
+        issues, stats = analyze_file(avi_path)
         codes = {i["code"] for i in issues}
         self.assertIn(ISSUE_CONTAINER_NOT_ALLOWED, codes)
         self.assertFalse(stats["container_is_allowed"])
@@ -204,7 +204,7 @@ class ScanMetadataCacheTests(unittest.TestCase):
 
             settings_a = dict(DEFAULT_SCAN_RULES_SETTINGS)
             settings_b = dict(DEFAULT_SCAN_RULES_SETTINGS)
-            settings_b["check_hdr"] = False
+            settings_b["check_tenbit_h264"] = False
 
             self.cache = ScanMetadataCache(db_path=db_path, rules_settings=settings_a)
             _issues1, _stats1, from_cache1 = self.cache.analyze_file_cached(media_path)

@@ -12,9 +12,10 @@ from nas_checker.scan.issues import (
     ISSUE_CONTAINER_NOT_ALLOWED,
     ISSUE_HDR_DETECTED,
     ISSUE_TENBIT_H264,
-    ISSUE_VIDEO_CODEC_NOT_ALLOWED,
+    ISSUE_WRONG_RESOLUTION,
     issue_code,
 )
+from nas_checker.scan.scan_rules_settings import DEFAULT_SCAN_RULES_SETTINGS
 
 
 def _hevc_aac_streams():
@@ -80,8 +81,24 @@ def test_analyze_file_clean_mp4(media_file):
     assert stats["audio_found"] is True
 
 
-def test_analyze_file_mkv_container_flags_issue(tmp_path, monkeypatch):
-    path = tmp_path / "sample.mkv"
+def test_default_scan_rules_match_optimized_profile():
+    assert DEFAULT_SCAN_RULES_SETTINGS == {
+        "containers": ["mp4", "mkv"],
+        "video_codecs": ["hevc", "h264"],
+        "audio_codecs": ["aac", "ac3", "eac3"],
+        "min_file_size_bytes": 1_000_000,
+        "check_subtitles": False,
+        "check_hdr": False,
+        "check_tenbit_h264": True,
+        "check_multiple_audio": False,
+        "check_multiple_subtitle": False,
+        "check_multiple_commentary": True,
+        "check_wrong_resolution": True,
+    }
+
+
+def test_analyze_file_disallowed_container_flags_issue(tmp_path, monkeypatch):
+    path = tmp_path / "sample.avi"
     path.write_bytes(b"x" * 2_000_000)
     monkeypatch.setattr(rules, "get_media_info", lambda _f: _hevc_aac_streams())
 
@@ -98,18 +115,17 @@ def test_analyze_file_tenbit_h264(tmp_path, monkeypatch):
 
     issues, _stats = rules.analyze_file(path)
     codes = {issue_code(i) for i in issues}
-    assert ISSUE_VIDEO_CODEC_NOT_ALLOWED in codes
     assert ISSUE_TENBIT_H264 in codes
 
 
-def test_analyze_file_hdr_detected(tmp_path, monkeypatch):
+def test_analyze_file_hdr_default_is_not_noisy(tmp_path, monkeypatch):
     path = tmp_path / "sample.mp4"
     path.write_bytes(b"x" * 2_000_000)
     monkeypatch.setattr(rules, "get_media_info", lambda _f: _hdr_streams())
 
     issues, stats = rules.analyze_file(path)
     codes = {issue_code(i) for i in issues}
-    assert ISSUE_HDR_DETECTED in codes
+    assert ISSUE_HDR_DETECTED not in codes
     assert stats["hdr_detected"] is True
 
 
@@ -122,8 +138,56 @@ def test_analyze_file_wrong_resolution(tmp_path, monkeypatch):
     monkeypatch.setattr(rules, "get_media_info", lambda _f: streams)
 
     issues, stats = rules.analyze_file(path)
+    codes = {issue_code(i) for i in issues}
     assert stats["wrong_resolution_issue"] is True
-    assert any("Wrong resolution" in i["message"] for i in issues)
+    assert ISSUE_WRONG_RESOLUTION in codes
+    assert any("expected 1080p, found 720p" in i["message"] for i in issues)
+
+
+def test_analyze_file_ignores_unknown_resolution_token(tmp_path, monkeypatch):
+    path = tmp_path / "Show - 80p.mp4"
+    path.write_bytes(b"x" * 2_000_000)
+
+    streams = _hevc_aac_streams()
+    streams["streams"][0]["height"] = 1080
+    monkeypatch.setattr(rules, "get_media_info", lambda _f: streams)
+
+    issues, stats = rules.analyze_file(path)
+    codes = {issue_code(i) for i in issues}
+    assert stats["expected_resolution_height"] is None
+    assert stats["wrong_resolution_issue"] is False
+    assert ISSUE_WRONG_RESOLUTION not in codes
+
+
+def test_analyze_file_ignores_resolution_substrings(tmp_path, monkeypatch):
+    path = tmp_path / "Show source1080pnotes.mp4"
+    path.write_bytes(b"x" * 2_000_000)
+
+    streams = _hevc_aac_streams()
+    streams["streams"][0]["height"] = 720
+    monkeypatch.setattr(rules, "get_media_info", lambda _f: streams)
+
+    issues, stats = rules.analyze_file(path)
+    codes = {issue_code(i) for i in issues}
+    assert stats["expected_resolution_height"] is None
+    assert stats["wrong_resolution_issue"] is False
+    assert ISSUE_WRONG_RESOLUTION not in codes
+
+
+@pytest.mark.parametrize("height", [360, 480, 576, 720, 1080, 1440, 2160, 4320])
+def test_analyze_file_detects_common_resolution_tokens(tmp_path, monkeypatch, height):
+    path = tmp_path / f"Show - {height}p.mkv"
+    path.write_bytes(b"x" * 2_000_000)
+
+    streams = _hevc_aac_streams()
+    streams["streams"][0]["height"] = height
+    monkeypatch.setattr(rules, "get_media_info", lambda _f: streams)
+
+    issues, stats = rules.analyze_file(path)
+    codes = {issue_code(i) for i in issues}
+    assert stats["expected_resolution_height"] == height
+    assert stats["wrong_resolution_issue"] is False
+    assert ISSUE_WRONG_RESOLUTION not in codes
 
 
 def test_analyze_file_respects_rule_toggles(tmp_path, monkeypatch):

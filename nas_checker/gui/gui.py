@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QScrollArea,
     QSizePolicy,
+    QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QDate
+from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QAction
 
 from datetime import date, datetime, timezone, timedelta
@@ -36,11 +37,18 @@ import subprocess
 import sys
 
 from nas_checker.workers.worker import (
+    ArrConnectionTestWorker,
     AutoFixWorker,
     ReadSpeedBenchmarkWorker,
     ScanWorker,
     SonarrRedownloadWorker,
     RadarrRedownloadWorker,
+)
+from nas_checker.arr.arr_config import (
+    get_default_arr_config_path,
+    load_arr_config,
+    save_arr_config,
+    validate_arr_service_config,
 )
 from health.scan_history import ScanHistory
 from health.hardware import (
@@ -54,6 +62,10 @@ from nas_checker.scan.scan_rules_settings import (
     save_scan_rules_settings,
 )
 from nas_checker.scan.scan_path_settings import (
+    AUTO_FIX_MODE_AUTO_RUN,
+    AUTO_FIX_MODE_OFF,
+    AUTO_FIX_MODE_PROMPT,
+    DEFAULT_AUTO_FIX_MODE,
     DEFAULT_AUTO_WORKERS,
     DEFAULT_MANUAL_WORKERS,
     DEFAULT_MEDIA_FOLDER,
@@ -64,6 +76,7 @@ from nas_checker.scan.scan_path_settings import (
     RAW_MEASURED_READ_MB_S_KEY,
     get_default_scan_path_settings_path,
     load_scan_path_settings,
+    normalize_auto_fix_mode,
     normalize_scan_path,
     resolve_scan_path,
     save_scan_path_settings,
@@ -96,6 +109,7 @@ from nas_checker.gui.fixes import (
     ACTION_RADARR,
     ACTION_SONARR,
     classify_fix_action,
+    is_safe_auto_fix_action,
 )
 from nas_checker.output.report import save_report, save_report_json
 
@@ -132,6 +146,7 @@ class MainWindow(QWidget):
         self.auto_fix_worker = None
         self.sonarr_redownload_worker = None
         self.radarr_redownload_worker = None
+        self.arr_connection_test_workers = {}
         self.read_speed_benchmark_worker = None
         self._active_auto_fix_keys = set()
         self._pending_redownload_fixes = []
@@ -141,6 +156,13 @@ class MainWindow(QWidget):
         self.cache_hits = 0
         self.cache_misses = 0
         self._overdue_prompt_shown = False
+        self._scan_bad_files_by_key = {}
+        self._scan_bad_files_order = []
+        self._defer_fixes_refresh = False
+        self._fixes_refresh_needed = False
+        self._current_scan_is_resume = False
+        self._suppress_auto_fix_mode_save = False
+        self._fixes_select_press_state = {}
 
         self.setWindowTitle("NAS Media Validator")
         self._apply_app_style()
@@ -181,7 +203,7 @@ class MainWindow(QWidget):
 
         issues_scroll.setWidget(issues_widget)
         fixes_scroll = self._create_fixes_tab()
-        self.tabs.addTab(issues_scroll, "Issues")
+        self.tabs.addTab(issues_scroll, "Scanner")
         self.tabs.addTab(fixes_scroll, "Fixes")
         self.tabs.addTab(stats_widget, "Library Stats")
 
@@ -269,6 +291,94 @@ class MainWindow(QWidget):
         self.read_speed_status_label.setProperty("role", "statusText")
         worker_controls_layout.addWidget(self.read_speed_status_label)
         settings_layout.addWidget(self.worker_controls_group)
+
+        arr_group = QGroupBox("Arr Integrations")
+        arr_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        arr_layout = QVBoxLayout(arr_group)
+        arr_layout.setContentsMargins(16, 18, 16, 16)
+        arr_layout.setSpacing(10)
+        arr_intro = QLabel(
+            "Configure Sonarr and Radarr for redownload actions in the Fixes tab."
+        )
+        arr_intro.setWordWrap(True)
+        arr_layout.addWidget(arr_intro)
+
+        def add_arr_service_fields(service_name: str):
+            service_label = service_name.capitalize()
+            enabled_checkbox = QCheckBox(f"Enable {service_label}")
+            arr_layout.addWidget(enabled_checkbox)
+
+            arr_layout.addWidget(QLabel(f"{service_label} base URL"))
+            base_url_edit = QLineEdit()
+            base_url_edit.setPlaceholderText(
+                "http://localhost:8989"
+                if service_name == "sonarr"
+                else "http://localhost:7878"
+            )
+            base_url_edit.setClearButtonEnabled(True)
+            arr_layout.addWidget(base_url_edit)
+
+            arr_layout.addWidget(QLabel(f"{service_label} API key"))
+            api_key_row = QHBoxLayout()
+            api_key_row.setSpacing(8)
+            api_key_edit = QLineEdit()
+            api_key_edit.setEchoMode(QLineEdit.Password)
+            api_key_edit.setPlaceholderText(f"{service_label} API key")
+            api_key_edit.setClearButtonEnabled(True)
+            show_api_key_checkbox = QCheckBox("Show")
+            show_api_key_checkbox.toggled.connect(
+                lambda checked, edit=api_key_edit: edit.setEchoMode(
+                    QLineEdit.Normal if checked else QLineEdit.Password
+                )
+            )
+            api_key_row.addWidget(api_key_edit)
+            api_key_row.addWidget(show_api_key_checkbox)
+            arr_layout.addLayout(api_key_row)
+
+            return enabled_checkbox, base_url_edit, api_key_edit, show_api_key_checkbox
+
+        (
+            self.sonarr_enabled_checkbox,
+            self.sonarr_base_url_edit,
+            self.sonarr_api_key_edit,
+            self.sonarr_show_api_key_checkbox,
+        ) = add_arr_service_fields("sonarr")
+
+        arr_service_divider = QFrame()
+        arr_service_divider.setFrameShape(QFrame.HLine)
+        arr_service_divider.setFrameShadow(QFrame.Sunken)
+        arr_layout.addWidget(arr_service_divider)
+
+        (
+            self.radarr_enabled_checkbox,
+            self.radarr_base_url_edit,
+            self.radarr_api_key_edit,
+            self.radarr_show_api_key_checkbox,
+        ) = add_arr_service_fields("radarr")
+
+        arr_buttons_row = QHBoxLayout()
+        arr_buttons_row.setSpacing(8)
+        self.arr_save_button = QPushButton("Save Arr Settings")
+        self.arr_save_button.clicked.connect(self._save_arr_settings_from_ui)
+        self.sonarr_test_button = QPushButton("Test Sonarr")
+        self.sonarr_test_button.clicked.connect(
+            lambda: self._test_arr_connection("sonarr")
+        )
+        self.radarr_test_button = QPushButton("Test Radarr")
+        self.radarr_test_button.clicked.connect(
+            lambda: self._test_arr_connection("radarr")
+        )
+        arr_buttons_row.addWidget(self.arr_save_button)
+        arr_buttons_row.addWidget(self.sonarr_test_button)
+        arr_buttons_row.addWidget(self.radarr_test_button)
+        arr_buttons_row.addStretch(1)
+        arr_layout.addLayout(arr_buttons_row)
+
+        self.arr_settings_status_label = QLabel("")
+        self.arr_settings_status_label.setWordWrap(True)
+        self.arr_settings_status_label.setProperty("role", "statusText")
+        arr_layout.addWidget(self.arr_settings_status_label)
+        settings_layout.addWidget(arr_group)
 
         scan_settings_divider = QFrame()
         scan_settings_divider.setFrameShape(QFrame.HLine)
@@ -512,6 +622,7 @@ class MainWindow(QWidget):
         self.tabs.addTab(health_scroll, "NAS Health")
 
         self._init_scan_rules_settings_and_render()
+        self._init_arr_settings_and_render()
         self._render_scan_history_table()
         self._init_health_settings_and_render()
         main_layout.addWidget(self.tabs, 1)
@@ -724,8 +835,33 @@ class MainWindow(QWidget):
         intro_label.setWordWrap(True)
         self.fixes_status_label = QLabel("No issues loaded.")
         self.fixes_status_label.setProperty("role", "statusText")
+        self.auto_fix_mode_combo = QComboBox()
+        self.auto_fix_mode_combo.addItem("Off (default)", AUTO_FIX_MODE_OFF)
+        self.auto_fix_mode_combo.addItem("Prompt after scan", AUTO_FIX_MODE_PROMPT)
+        self.auto_fix_mode_combo.addItem(
+            "Auto-run safe fixes after scan", AUTO_FIX_MODE_AUTO_RUN
+        )
+        self.auto_fix_mode_combo.currentIndexChanged.connect(
+            self._on_auto_fix_mode_changed
+        )
+        auto_fix_mode_row = QHBoxLayout()
+        auto_fix_mode_row.setSpacing(10)
+        auto_fix_mode_row.addWidget(QLabel("Auto Fix after scan:"))
+        auto_fix_mode_row.addWidget(self.auto_fix_mode_combo)
+        auto_fix_mode_row.addStretch(1)
+        self.auto_fix_mode_warning_label = QLabel(
+            "Auto-run only starts ffmpeg-supported safe fixes; backups are created "
+            "before replace. Redownload and manual-review items stay manual."
+        )
+        self.auto_fix_mode_warning_label.setWordWrap(True)
+        self.auto_fix_mode_warning_label.setProperty("role", "dangerText")
+        self.auto_fix_mode_status_label = QLabel("")
+        self.auto_fix_mode_status_label.setProperty("role", "statusText")
         intro_layout.addWidget(intro_label)
         intro_layout.addWidget(self.fixes_status_label)
+        intro_layout.addLayout(auto_fix_mode_row)
+        intro_layout.addWidget(self.auto_fix_mode_warning_label)
+        intro_layout.addWidget(self.auto_fix_mode_status_label)
         fixes_layout.addWidget(intro_group, 0)
 
         controls_group = QGroupBox("Fix Controls")
@@ -766,7 +902,15 @@ class MainWindow(QWidget):
         self.fixes_table.setMinimumHeight(320)
         self.fixes_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.fixes_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.fixes_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.fixes_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.fixes_table.itemChanged.connect(self._on_fixes_item_changed)
+        self.fixes_table.cellPressed.connect(self._on_fixes_cell_pressed)
+        self.fixes_table.cellClicked.connect(self._on_fixes_cell_clicked)
 
         fixes_table_group = QGroupBox("Available Fixes")
         fixes_table_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1051,6 +1195,29 @@ class MainWindow(QWidget):
                 color: #ffffff;
             }
 
+            QTableWidget::item:selected:!active,
+            QListWidget::item:selected:!active {
+                background: #1d4ed8;
+                color: #ffffff;
+            }
+
+            QTableWidget::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #64748b;
+                background: #0b1220;
+            }
+
+            QTableWidget::indicator:hover {
+                border-color: #60a5fa;
+            }
+
+            QTableWidget::indicator:checked {
+                background: #16a34a;
+                border-color: #22c55e;
+            }
+
             QMenu {
                 background: #111827;
                 color: #e5e7eb;
@@ -1100,10 +1267,93 @@ class MainWindow(QWidget):
             }
         """
 
+    def _reset_current_scan_bad_files_model(self) -> None:
+        self._scan_bad_files_by_key = {}
+        self._scan_bad_files_order = []
+
+    def _record_current_scan_issue(self, file, issue) -> None:
+        file_key = self.canonicalize_path(file)
+        if not file_key:
+            return
+
+        file_disp = os.path.normpath(file) if file else file
+        normalized_issue = normalize_issues([issue])[0]
+        issue_identity = (
+            normalized_issue.get("code"),
+            normalized_issue.get("message"),
+        )
+
+        entry = self._scan_bad_files_by_key.get(file_key)
+        if entry is None:
+            entry = {"file": file_disp, "issues": [], "_issue_identities": set()}
+            self._scan_bad_files_by_key[file_key] = entry
+            self._scan_bad_files_order.append(file_key)
+
+        if issue_identity not in entry["_issue_identities"]:
+            entry["issues"].append(normalized_issue)
+            entry["_issue_identities"].add(issue_identity)
+
+    def _normalized_bad_file_entries(self, bad_files) -> list[dict]:
+        entries: list[dict] = []
+        for entry in bad_files or []:
+            if isinstance(entry, dict):
+                file_path = entry.get("file")
+                issues = entry.get("issues") or []
+            else:
+                try:
+                    file_path, issues = entry
+                except (TypeError, ValueError):
+                    continue
+
+            if not file_path:
+                continue
+
+            if isinstance(issues, str):
+                issues = [s.strip() for s in issues.split(",") if s.strip()]
+            normalized_issues = normalize_issues(issues)
+            if not normalized_issues:
+                continue
+
+            entries.append(
+                {
+                    "file": os.path.normpath(str(file_path)),
+                    "issues": normalized_issues,
+                }
+            )
+
+        return entries
+
+    def _merge_bad_file_entries_into_current_scan(self, bad_files) -> None:
+        for entry in self._normalized_bad_file_entries(bad_files):
+            for issue in entry["issues"]:
+                self._record_current_scan_issue(entry["file"], issue)
+
+    def _current_scan_bad_files_snapshot(self) -> list[dict]:
+        snapshot: list[dict] = []
+        for file_key in self._scan_bad_files_order:
+            entry = self._scan_bad_files_by_key.get(file_key)
+            if not entry:
+                continue
+            issues = normalize_issues(entry.get("issues") or [])
+            if not issues:
+                continue
+            snapshot.append({"file": entry.get("file"), "issues": issues})
+        return snapshot
+
+    def _bad_files_issue_count(self, bad_files: list[dict]) -> int:
+        return sum(len(entry.get("issues") or []) for entry in bad_files)
+
+    def _schedule_fixes_refresh(self, preserve_state: bool = True) -> None:
+        if self._defer_fixes_refresh:
+            self._fixes_refresh_needed = True
+            return
+        self.refresh_fixes_from_issues(preserve_state=preserve_state)
+
     def add_issue(self, file, issue):
         file_key = self.canonicalize_path(file)
         file_disp = os.path.normpath(file) if file else file
         issue_text = issue_message(issue)
+        self._record_current_scan_issue(file, issue)
 
         # check if this file already exists in the table
         for row in range(self.table.rowCount()):
@@ -1125,7 +1375,7 @@ class MainWindow(QWidget):
                     if issue_text not in current_text:
                         issue_item.setText(current_text + ", " + issue_text)
 
-                self.refresh_fixes_from_issues(preserve_state=True)
+                self._schedule_fixes_refresh(preserve_state=True)
                 return
 
         # file not yet in table → create new row
@@ -1145,13 +1395,56 @@ class MainWindow(QWidget):
 
         self.table.scrollToBottom()
         self.apply_issue_filter(self.issue_filter.text())
-        self.refresh_fixes_from_issues(preserve_state=True)
+        self._schedule_fixes_refresh(preserve_state=True)
 
     def _on_fixes_item_changed(self, item):
         if getattr(self, "_suppress_fixes_item_changed", False):
             return
         if item.column() == 0:
             self._update_fixes_status_label()
+
+    def _on_fixes_cell_pressed(self, row: int, column: int) -> None:
+        if column != 0:
+            return
+        select_item = self.fixes_table.item(row, 0)
+        if self._is_fix_row_checkable(row, select_item):
+            self._fixes_select_press_state[row] = select_item.checkState()
+        else:
+            self._fixes_select_press_state.pop(row, None)
+
+    def _on_fixes_cell_clicked(self, row: int, column: int) -> None:
+        if row < 0:
+            return
+        self.fixes_table.selectRow(row)
+        if column == 0:
+            pressed_state = self._fixes_select_press_state.pop(row, None)
+            self._toggle_fix_row_checked(row, only_if_unchanged_from=pressed_state)
+            return
+        self._toggle_fix_row_checked(row)
+
+    def _is_fix_row_checkable(self, row: int, select_item=None) -> bool:
+        entry = self._fix_entry_for_row(row)
+        if not entry or not entry.get("fixable"):
+            return False
+        select_item = select_item or self.fixes_table.item(row, 0)
+        return bool(select_item and select_item.flags() & Qt.ItemIsEnabled)
+
+    def _toggle_fix_row_checked(
+        self, row: int, only_if_unchanged_from: Qt.CheckState | None = None
+    ) -> None:
+        select_item = self.fixes_table.item(row, 0)
+        if not self._is_fix_row_checkable(row, select_item):
+            return
+        if (
+            only_if_unchanged_from is not None
+            and select_item.checkState() != only_if_unchanged_from
+        ):
+            self._update_fixes_status_label()
+            return
+        next_state = (
+            Qt.Unchecked if select_item.checkState() == Qt.Checked else Qt.Checked
+        )
+        select_item.setCheckState(next_state)
 
     def _current_fixes_state(self) -> dict[str, dict]:
         state = {}
@@ -1177,17 +1470,19 @@ class MainWindow(QWidget):
             return
 
         previous_state = self._current_fixes_state() if preserve_state else {}
-        self._suppress_fixes_item_changed = True
-        try:
-            self.fixes_table.setRowCount(0)
-            for issue_row in range(self.table.rowCount()):
-                file_item = self.table.item(issue_row, 0)
-                issue_item = self.table.item(issue_row, 1)
-                if file_item is None or issue_item is None:
-                    continue
+        issue_rows = []
+        for issue_row in range(self.table.rowCount()):
+            file_item = self.table.item(issue_row, 0)
+            issue_item = self.table.item(issue_row, 1)
+            if file_item is None or issue_item is None:
+                continue
+            issue_rows.append((file_item.text(), issue_item.text()))
 
-                file_path = file_item.text()
-                issues_text = issue_item.text()
+        self._suppress_fixes_item_changed = True
+        self.fixes_table.setUpdatesEnabled(False)
+        try:
+            self.fixes_table.setRowCount(len(issue_rows))
+            for row, (file_path, issues_text) in enumerate(issue_rows):
                 file_key = self.canonicalize_path(file_path)
                 action = classify_fix_action(file_path, issues_text)
                 previous = previous_state.get(file_key, {})
@@ -1197,25 +1492,31 @@ class MainWindow(QWidget):
                     else Qt.Unchecked
                 )
                 status = previous.get("status") or action.status
+                if is_safe_auto_fix_action(action) and status == "Ready":
+                    status = "Ready - safe auto-fix eligible"
                 if file_key in self._active_auto_fix_keys:
                     status = "Running ffmpeg"
                 elif self._active_redownload_fix_key == file_key:
                     status = "Running redownload"
 
-                row = self.fixes_table.rowCount()
-                self.fixes_table.insertRow(row)
-
                 select_item = QTableWidgetItem("")
-                select_flags = select_item.flags() | Qt.ItemIsUserCheckable
-                select_item.setFlags(select_flags & ~Qt.ItemIsEditable)
+                select_item.setFlags(
+                    Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable
+                )
                 select_item.setCheckState(checked)
                 if not action.fixable:
-                    select_item.setFlags(select_item.flags() & ~Qt.ItemIsEnabled)
+                    select_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+                    select_item.setToolTip(
+                        "Manual review required; no automatic fix is available."
+                    )
 
                 file_fix_item = QTableWidgetItem(file_path)
                 file_fix_item.setData(Qt.UserRole, file_key)
                 issue_summary_item = QTableWidgetItem(issues_text)
-                fix_item = QTableWidgetItem(action.label)
+                fix_label = action.label
+                if is_safe_auto_fix_action(action):
+                    fix_label = f"{action.label} (safe auto-fix eligible)"
+                fix_item = QTableWidgetItem(fix_label)
                 fix_item.setData(
                     Qt.UserRole,
                     {
@@ -1224,6 +1525,7 @@ class MainWindow(QWidget):
                         "issues_text": issues_text,
                         "action_id": action.action_id,
                         "fixable": action.fixable,
+                        "auto_fix_eligible": action.auto_fix_eligible,
                         "label": action.label,
                     },
                 )
@@ -1235,6 +1537,7 @@ class MainWindow(QWidget):
                     fix_item,
                     status_item,
                 ):
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     item.setToolTip(item.text())
 
                 self.fixes_table.setItem(row, 0, select_item)
@@ -1243,6 +1546,7 @@ class MainWindow(QWidget):
                 self.fixes_table.setItem(row, 3, fix_item)
                 self.fixes_table.setItem(row, 4, status_item)
         finally:
+            self.fixes_table.setUpdatesEnabled(True)
             self._suppress_fixes_item_changed = False
 
         self._update_fixes_status_label()
@@ -1253,18 +1557,23 @@ class MainWindow(QWidget):
 
         total = self.fixes_table.rowCount()
         fixable = 0
+        auto_fix_eligible = 0
         selected = 0
         for row in range(total):
             entry = self._fix_entry_for_row(row)
             if entry and entry.get("fixable"):
                 fixable += 1
+            if entry and entry.get("auto_fix_eligible"):
+                auto_fix_eligible += 1
             select_item = self.fixes_table.item(row, 0)
             if select_item and select_item.checkState() == Qt.Checked:
                 selected += 1
 
         self.fixes_status_label.setText(
-            f"Rows: {total} | Fixable: {fixable} | Selected: {selected}"
+            f"Rows: {total} | Fixable: {fixable} | "
+            f"Safe auto-fix eligible: {auto_fix_eligible} | Selected: {selected}"
         )
+        self._update_auto_fix_mode_label()
 
     def _fix_entry_for_row(self, row: int) -> dict | None:
         fix_item = self.fixes_table.item(row, 3)
@@ -1289,13 +1598,128 @@ class MainWindow(QWidget):
                     status_item.setText(status)
                 break
 
+    def _current_auto_fix_mode(self) -> str:
+        if hasattr(self, "auto_fix_mode_combo"):
+            mode = self.auto_fix_mode_combo.currentData()
+        else:
+            mode = getattr(self, "scan_path_settings", {}).get("auto_fix_mode")
+        return normalize_auto_fix_mode(mode)
+
+    def _set_auto_fix_mode_combo(self, mode: str) -> None:
+        if not hasattr(self, "auto_fix_mode_combo"):
+            return
+        normalized_mode = normalize_auto_fix_mode(mode)
+        index = self.auto_fix_mode_combo.findData(normalized_mode)
+        if index < 0:
+            index = self.auto_fix_mode_combo.findData(DEFAULT_AUTO_FIX_MODE)
+        self._suppress_auto_fix_mode_save = True
+        try:
+            self.auto_fix_mode_combo.setCurrentIndex(max(index, 0))
+        finally:
+            self._suppress_auto_fix_mode_save = False
+        self._update_auto_fix_mode_label()
+
+    def _auto_fix_mode_display_name(self, mode: str | None = None) -> str:
+        mode = normalize_auto_fix_mode(mode or self._current_auto_fix_mode())
+        labels = {
+            AUTO_FIX_MODE_OFF: "Off",
+            AUTO_FIX_MODE_PROMPT: "Prompt after scan",
+            AUTO_FIX_MODE_AUTO_RUN: "Auto-run safe fixes after scan",
+        }
+        return labels.get(mode, labels[AUTO_FIX_MODE_OFF])
+
+    def _update_auto_fix_mode_label(self) -> None:
+        if not hasattr(self, "auto_fix_mode_status_label"):
+            return
+        self.auto_fix_mode_status_label.setText(
+            f"Current auto-fix mode: {self._auto_fix_mode_display_name()}."
+        )
+
+    def _on_auto_fix_mode_changed(self, _index: int) -> None:
+        mode = self._current_auto_fix_mode()
+        self._update_auto_fix_mode_label()
+        if getattr(self, "_suppress_auto_fix_mode_save", False):
+            return
+        if hasattr(self, "scan_path_settings_path"):
+            save_scan_path_settings(
+                {
+                    "media_folder": normalize_scan_path(
+                        self.scan_media_folder_edit.text()
+                    ),
+                    "auto_fix_mode": mode,
+                },
+                self.scan_path_settings_path,
+            )
+            self.scan_path_settings = load_scan_path_settings(
+                self.scan_path_settings_path
+            )
+        self.output.append(
+            f"Auto Fix mode set to {self._auto_fix_mode_display_name(mode)}."
+        )
+
+    def _safe_auto_fix_entries_from_table(self) -> list[dict]:
+        entries = []
+        seen_file_keys = set()
+        if not hasattr(self, "fixes_table"):
+            return entries
+        for row in range(self.fixes_table.rowCount()):
+            entry = self._fix_entry_for_row(row)
+            if not entry or not entry.get("auto_fix_eligible"):
+                continue
+            if entry.get("action_id") != ACTION_FFMPEG:
+                continue
+            file_key = entry.get("file_key")
+            if not file_key or file_key in seen_file_keys:
+                continue
+            seen_file_keys.add(file_key)
+            entries.append(entry)
+        return entries
+
+    def _start_ffmpeg_auto_fix_entries(
+        self, entries: list[dict], source_label: str = "Fixes"
+    ) -> bool:
+        if self.auto_fix_worker and self.auto_fix_worker.isRunning():
+            self.output.append(f"{source_label}: auto-fix already running.")
+            return False
+        if not entries:
+            self.output.append(f"{source_label}: no safe ffmpeg fixes to run.")
+            return False
+
+        inputs = [entry["file_path"] for entry in entries]
+        issues_by_input = {
+            entry["file_path"]: entry["issues_text"] for entry in entries
+        }
+        self._active_auto_fix_keys = {entry["file_key"] for entry in entries}
+        for entry in entries:
+            self._set_fix_status_by_key(entry["file_key"], "Running ffmpeg")
+
+        self.output.append(
+            f"{source_label}: running ffmpeg auto-fix for {len(inputs)} file(s)."
+        )
+        self.auto_fix_worker = AutoFixWorker(inputs, issues_by_input)
+        self.auto_fix_worker.log.connect(self.add_log)
+        self.auto_fix_worker.progress.connect(self.update_auto_fix_progress)
+        self.auto_fix_worker.finished.connect(self.auto_fix_finished)
+        self.auto_fix_progress.setVisible(True)
+        self.auto_fix_progress.setMaximum(len(inputs))
+        self.auto_fix_progress.setValue(0)
+        self.auto_fix_stop_button.setVisible(True)
+        self.auto_fix_stop_button.setEnabled(True)
+        self.auto_fix_worker.start()
+        return True
+
     def select_all_fixable(self) -> None:
         self._suppress_fixes_item_changed = True
         try:
             for row in range(self.fixes_table.rowCount()):
                 entry = self._fix_entry_for_row(row)
                 select_item = self.fixes_table.item(row, 0)
-                if entry and entry.get("fixable") and select_item is not None:
+                if (
+                    entry
+                    and entry.get("fixable")
+                    and select_item is not None
+                    and select_item.flags() & Qt.ItemIsEnabled
+                ):
                     select_item.setCheckState(Qt.Checked)
         finally:
             self._suppress_fixes_item_changed = False
@@ -1364,27 +1788,7 @@ class MainWindow(QWidget):
         ]
 
         if ffmpeg_entries:
-            inputs = [entry["file_path"] for entry in ffmpeg_entries]
-            issues_by_input = {
-                entry["file_path"]: entry["issues_text"] for entry in ffmpeg_entries
-            }
-            self._active_auto_fix_keys = {entry["file_key"] for entry in ffmpeg_entries}
-            for entry in ffmpeg_entries:
-                self._set_fix_status_by_key(entry["file_key"], "Running ffmpeg")
-
-            self.output.append(
-                f"Fixes: running ffmpeg auto-fix for {len(inputs)} file(s)."
-            )
-            self.auto_fix_worker = AutoFixWorker(inputs, issues_by_input)
-            self.auto_fix_worker.log.connect(self.add_log)
-            self.auto_fix_worker.progress.connect(self.update_auto_fix_progress)
-            self.auto_fix_worker.finished.connect(self.auto_fix_finished)
-            self.auto_fix_progress.setVisible(True)
-            self.auto_fix_progress.setMaximum(len(inputs))
-            self.auto_fix_progress.setValue(0)
-            self.auto_fix_stop_button.setVisible(True)
-            self.auto_fix_stop_button.setEnabled(True)
-            self.auto_fix_worker.start()
+            self._start_ffmpeg_auto_fix_entries(ffmpeg_entries, "Fixes")
 
         self._pending_redownload_fixes = list(redownload_entries)
         self._start_next_redownload_fix()
@@ -1410,6 +1814,11 @@ class MainWindow(QWidget):
 
         action_id = entry.get("action_id")
         if action_id == ACTION_SONARR:
+            if not self._arr_service_ready_for_redownload("sonarr"):
+                self._set_fix_status_by_key(file_key, "Error: Sonarr not configured")
+                self._active_redownload_fix_key = None
+                self._start_next_redownload_fix()
+                return
             self.output.append(f"Fixes: Sonarr redownload requested for '{media_term}'")
             self.sonarr_redownload_worker = SonarrRedownloadWorker(media_term)
             self.sonarr_redownload_worker.log.connect(self.add_log)
@@ -1420,6 +1829,11 @@ class MainWindow(QWidget):
             return
 
         if action_id == ACTION_RADARR:
+            if not self._arr_service_ready_for_redownload("radarr"):
+                self._set_fix_status_by_key(file_key, "Error: Radarr not configured")
+                self._active_redownload_fix_key = None
+                self._start_next_redownload_fix()
+                return
             self.output.append(f"Fixes: Radarr redownload requested for '{media_term}'")
             self.radarr_redownload_worker = RadarrRedownloadWorker(media_term)
             self.radarr_redownload_worker.log.connect(self.add_log)
@@ -1507,9 +1921,13 @@ class MainWindow(QWidget):
         self.new_scan_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         is_resume = self.resume_after is not None
+        self._current_scan_is_resume = is_resume
+        self._defer_fixes_refresh = True
+        self._fixes_refresh_needed = False
         if not is_resume:
             self.current_scan_started_at = datetime.now(timezone.utc)
         if not is_resume:
+            self._reset_current_scan_bad_files_model()
             self.output.clear()
             self.table.setRowCount(0)
             self.fixes_table.setRowCount(0)
@@ -1755,6 +2173,9 @@ class MainWindow(QWidget):
             self.output.append("Sonarr redownload already running.")
             return
 
+        if not self._arr_service_ready_for_redownload("sonarr"):
+            return
+
         self.output.append(f"Sonarr: redownload requested for '{series_term}'")
         self.sonarr_redownload_worker = SonarrRedownloadWorker(series_term)
         self.sonarr_redownload_worker.log.connect(self.add_log)
@@ -1802,6 +2223,9 @@ class MainWindow(QWidget):
 
         if self.radarr_redownload_worker and self.radarr_redownload_worker.isRunning():
             self.output.append("Radarr redownload already running.")
+            return
+
+        if not self._arr_service_ready_for_redownload("radarr"):
             return
 
         self.output.append(f"Radarr: redownload requested for '{movie_term}'")
@@ -1935,9 +2359,11 @@ class MainWindow(QWidget):
     def scan_finished(self, payload):
         self.start_button.setEnabled(True)
         self.new_scan_button.setEnabled(True)
+        self._defer_fixes_refresh = False
 
         bad_files = payload.get("bad_files", [])
         stats_delta = payload.get("stats", {})
+        self._merge_bad_file_entries_into_current_scan(bad_files)
 
         self.cache_hits = int(stats_delta.get("cache_hits", 0) or 0)
         self.cache_misses = int(stats_delta.get("cache_misses", 0) or 0)
@@ -1955,26 +2381,85 @@ class MainWindow(QWidget):
             self.output.append(
                 f"Scan stopped by user. Resume from: {self.resume_after}"
             )
-            self.output.append(f"Files with issues so far: {len(bad_files)}")
+            issue_snapshot = self._current_scan_bad_files_snapshot()
+            self.output.append(f"Files with issues so far: {len(issue_snapshot)}")
+            if self._fixes_refresh_needed:
+                self.refresh_fixes_from_issues(preserve_state=True)
+                self._fixes_refresh_needed = False
             return
 
         self.resume_after = None
         self.resume_scan_root = None
         self.label.setText("Scan Complete")
 
-        self.output.append(f"Files with issues: {len(bad_files)}")
-        for file, issues in bad_files:
-            self.output.append(file)
-            for issue in normalize_issues(issues):
-                self.output.append("  - " + issue_message(issue))
-            self.output.append("")
+        if self._current_scan_is_resume:
+            history_bad_files = self._current_scan_bad_files_snapshot()
+        else:
+            history_bad_files = self._normalized_bad_file_entries(bad_files)
+            if not history_bad_files:
+                history_bad_files = self._current_scan_bad_files_snapshot()
 
-        # Persist scan results after a fully completed scan.
-        # If you resumed mid-scan, `payload.bad_files` only covers the last chunk,
-        # so we snapshot the currently accumulated UI table instead.
-        self._persist_completed_scan_to_history()
+        issue_count = self._bad_files_issue_count(history_bad_files)
+        self.output.append(
+            f"Scan complete. Files with issues: {len(history_bad_files)}; "
+            f"total issues: {issue_count}."
+        )
+        self.output.append(
+            "Issue details are available in the Issues table, exports, and scan history."
+        )
+
+        self._persist_completed_scan_to_history(history_bad_files)
         self._render_nas_health_tab_latest()
         self._check_overdue_scan_prompt()
+        if self._fixes_refresh_needed:
+            QTimer.singleShot(0, self._refresh_fixes_and_handle_auto_fix_after_scan)
+            self._fixes_refresh_needed = False
+        else:
+            QTimer.singleShot(0, self._handle_auto_fix_after_scan)
+
+    def _refresh_fixes_and_handle_auto_fix_after_scan(self) -> None:
+        self.refresh_fixes_from_issues(True)
+        self._handle_auto_fix_after_scan()
+
+    def _handle_auto_fix_after_scan(self) -> None:
+        mode = self._current_auto_fix_mode()
+        if mode == AUTO_FIX_MODE_OFF:
+            return
+
+        if self.auto_fix_worker and self.auto_fix_worker.isRunning():
+            self.output.append("Auto Fix after scan skipped: auto-fix already running.")
+            return
+
+        entries = self._safe_auto_fix_entries_from_table()
+        count = len(entries)
+        if count <= 0:
+            self.output.append("Auto Fix after scan: no safe ffmpeg fixes found.")
+            return
+
+        if mode == AUTO_FIX_MODE_PROMPT:
+            response = QMessageBox.question(
+                self,
+                "Run safe auto fixes?",
+                (
+                    f"{count} fixable files found. Run safe fixes now?\n\n"
+                    "Only ffmpeg-supported safe fixes will run. Backups are created "
+                    "before replace. Redownload and manual-review items are excluded."
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if response != QMessageBox.Yes:
+                self.output.append("Auto Fix after scan: user skipped safe fixes.")
+                return
+            self.output.append("Auto Fix after scan: user confirmed safe fixes.")
+            self._start_ffmpeg_auto_fix_entries(entries, "Auto Fix after scan")
+            return
+
+        if mode == AUTO_FIX_MODE_AUTO_RUN:
+            self.output.append(
+                "Auto Fix after scan: starting safe ffmpeg fixes automatically."
+            )
+            self._start_ffmpeg_auto_fix_entries(entries, "Auto Fix after scan")
 
     def _browse_media_folder(self) -> None:
         start_dir = self.scan_media_folder_edit.text() or self.media_folder
@@ -2082,6 +2567,7 @@ class MainWindow(QWidget):
     def _show_history_record(self, record: dict) -> None:
         stats = record.get("stats") or {}
         bad_files = record.get("bad_files") or []
+        bad_file_entries = self._normalized_bad_file_entries(bad_files)
 
         self.output.clear()
         self.table.setRowCount(0)
@@ -2101,29 +2587,41 @@ class MainWindow(QWidget):
         self.output.append(
             f"Loaded scan history: {status}\nStarted: {started_at}\nCompleted: {completed_at}"
         )
+        self.output.append(
+            f"Files with issues: {len(bad_file_entries)}; "
+            f"total issues: {self._bad_files_issue_count(bad_file_entries)}."
+        )
+        self.output.append("Issue details are loaded in the Issues table.")
 
-        # Load issues into the existing table.
-        if isinstance(bad_files, list):
-            for entry in bad_files:
-                if not isinstance(entry, dict):
-                    continue
-                file_path = entry.get("file")
-                issues = entry.get("issues") or []
-                if not file_path or not issues:
-                    continue
-
-                for issue in issues:
-                    normalized = normalize_issues([issue])[0]
-                    self.add_issue(file_path, normalized)
-
-                self.output.append(str(file_path))
-                for issue in issues:
-                    self.output.append("  - " + issue_message(issue))
-                self.output.append("")
+        self._load_bad_file_entries_into_issue_table(bad_file_entries)
 
         self._render_nas_health_for_record(record)
         self.refresh_fixes_from_issues(preserve_state=False)
         self.label.setText("Viewing Scan History")
+
+    def _load_bad_file_entries_into_issue_table(
+        self, bad_file_entries: list[dict]
+    ) -> None:
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(len(bad_file_entries))
+            for row, entry in enumerate(bad_file_entries):
+                file_path = entry.get("file")
+                issues = normalize_issues(entry.get("issues") or [])
+                file_item = QTableWidgetItem(str(file_path))
+                file_item.setData(Qt.UserRole, self.canonicalize_path(file_path))
+                issue_item = QTableWidgetItem(
+                    ", ".join(issue_message(issue) for issue in issues)
+                )
+
+                self.table.setItem(row, 0, file_item)
+                self.table.setItem(row, 1, issue_item)
+                file_item.setBackground(Qt.darkRed)
+                issue_item.setBackground(Qt.darkRed)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+        self.apply_issue_filter(self.issue_filter.text())
 
     def _get_table_bad_files_snapshot(self) -> list[dict]:
         snapshot: list[dict] = []
@@ -2142,7 +2640,9 @@ class MainWindow(QWidget):
 
         return snapshot
 
-    def _persist_completed_scan_to_history(self) -> None:
+    def _persist_completed_scan_to_history(
+        self, bad_files_snapshot: list[dict] | None = None
+    ) -> None:
         # Only persist after a real completion (not when stopped for resume).
         if not self.library_stats_total:
             return
@@ -2152,7 +2652,11 @@ class MainWindow(QWidget):
 
         # Build a deep-enough copy so future UI actions don't mutate history objects.
         stats_copy = json.loads(json.dumps(self.library_stats_total))
-        bad_files_snapshot = self._get_table_bad_files_snapshot()
+        if bad_files_snapshot is None:
+            bad_files_snapshot = self._current_scan_bad_files_snapshot()
+        if not bad_files_snapshot and self.table.rowCount() > 0:
+            bad_files_snapshot = self._get_table_bad_files_snapshot()
+        bad_files_snapshot = json.loads(json.dumps(bad_files_snapshot))
 
         issues_total = 0
         for entry in bad_files_snapshot:
@@ -2211,6 +2715,9 @@ class MainWindow(QWidget):
         self.scan_workers_manual_spin.setValue(
             int(self.scan_path_settings.get("manual_workers", DEFAULT_MANUAL_WORKERS))
         )
+        self._set_auto_fix_mode_combo(
+            self.scan_path_settings.get("auto_fix_mode", DEFAULT_AUTO_FIX_MODE)
+        )
         self._on_auto_workers_toggled(self.scan_workers_auto_checkbox.isChecked())
         self._update_read_speed_status_label()
 
@@ -2227,19 +2734,19 @@ class MainWindow(QWidget):
             int(self.scan_rules_settings.get("min_file_size_bytes", 1_000_000))
         )
         self.scan_rules_check_subtitles.setChecked(
-            bool(self.scan_rules_settings.get("check_subtitles", True))
+            bool(self.scan_rules_settings.get("check_subtitles", False))
         )
         self.scan_rules_check_hdr.setChecked(
-            bool(self.scan_rules_settings.get("check_hdr", True))
+            bool(self.scan_rules_settings.get("check_hdr", False))
         )
         self.scan_rules_check_tenbit_h264.setChecked(
             bool(self.scan_rules_settings.get("check_tenbit_h264", True))
         )
         self.scan_rules_check_multiple_audio.setChecked(
-            bool(self.scan_rules_settings.get("check_multiple_audio", True))
+            bool(self.scan_rules_settings.get("check_multiple_audio", False))
         )
         self.scan_rules_check_multiple_subtitle.setChecked(
-            bool(self.scan_rules_settings.get("check_multiple_subtitle", True))
+            bool(self.scan_rules_settings.get("check_multiple_subtitle", False))
         )
         self.scan_rules_check_multiple_commentary.setChecked(
             bool(self.scan_rules_settings.get("check_multiple_commentary", True))
@@ -2249,6 +2756,121 @@ class MainWindow(QWidget):
         )
 
         self.scan_rules_settings_status_label.setText("Scan settings loaded.")
+
+    def _init_arr_settings_and_render(self) -> None:
+        self.arr_config_path = get_default_arr_config_path()
+        self.arr_settings = load_arr_config(self.arr_config_path) or {}
+        self._apply_arr_settings_to_ui()
+        self.arr_settings_status_label.setText(
+            f"Arr settings loaded from {self.arr_config_path}."
+        )
+
+    def _apply_arr_settings_to_ui(self) -> None:
+        for service in ("sonarr", "radarr"):
+            service_config = (self.arr_settings or {}).get(service) or {}
+            enabled_checkbox = getattr(self, f"{service}_enabled_checkbox")
+            base_url_edit = getattr(self, f"{service}_base_url_edit")
+            api_key_edit = getattr(self, f"{service}_api_key_edit")
+
+            enabled_checkbox.setChecked(bool(service_config.get("enabled", False)))
+            base_url_edit.setText(str(service_config.get("base_url") or ""))
+            api_key_edit.setText(str(service_config.get("api_key") or ""))
+
+    def _collect_arr_settings_from_ui(self) -> dict:
+        return {
+            "sonarr": {
+                "enabled": self.sonarr_enabled_checkbox.isChecked(),
+                "base_url": self.sonarr_base_url_edit.text().strip(),
+                "api_key": self.sonarr_api_key_edit.text().strip(),
+            },
+            "radarr": {
+                "enabled": self.radarr_enabled_checkbox.isChecked(),
+                "base_url": self.radarr_base_url_edit.text().strip(),
+                "api_key": self.radarr_api_key_edit.text().strip(),
+            },
+        }
+
+    def _arr_settings_validation_errors(self, config: dict) -> list[str]:
+        errors = []
+        for service in ("sonarr", "radarr"):
+            service_config = (config or {}).get(service) or {}
+            if service_config.get("enabled"):
+                errors.extend(validate_arr_service_config(service, service_config))
+        return errors
+
+    def _save_arr_settings_from_ui(self) -> bool:
+        config = self._collect_arr_settings_from_ui()
+        errors = self._arr_settings_validation_errors(config)
+        if errors:
+            self.arr_settings_status_label.setText(" ".join(errors))
+            return False
+
+        saved_path = save_arr_config(config, self.arr_config_path)
+        self.arr_settings = load_arr_config(saved_path) or {}
+        self._apply_arr_settings_to_ui()
+        self.arr_settings_status_label.setText(f"Arr settings saved to {saved_path}.")
+        return True
+
+    def _test_arr_connection(self, service: str) -> None:
+        config = self._collect_arr_settings_from_ui()
+        service_config = (config or {}).get(service) or {}
+        errors = validate_arr_service_config(
+            service,
+            {**service_config, "enabled": True},
+        )
+        if errors:
+            self.arr_settings_status_label.setText(" ".join(errors))
+            return
+
+        worker = self.arr_connection_test_workers.get(service)
+        if worker and worker.isRunning():
+            self.arr_settings_status_label.setText(
+                f"{service.capitalize()} connection test already running..."
+            )
+            return
+
+        test_button = getattr(self, f"{service}_test_button")
+        test_button.setEnabled(False)
+        self.arr_settings_status_label.setText(
+            f"Testing {service.capitalize()} connection..."
+        )
+        worker = ArrConnectionTestWorker(
+            service,
+            service_config.get("base_url", ""),
+            service_config.get("api_key", ""),
+        )
+        self.arr_connection_test_workers[service] = worker
+        worker.finished.connect(
+            lambda message, ok, svc=service: self._arr_connection_test_finished(
+                svc,
+                message,
+                ok,
+            )
+        )
+        worker.start()
+
+    def _arr_connection_test_finished(
+        self,
+        service: str,
+        message: str,
+        ok: bool,
+    ) -> None:
+        getattr(self, f"{service}_test_button").setEnabled(True)
+        self.arr_settings_status_label.setText(message)
+        self.output.append(message)
+        self.arr_connection_test_workers.pop(service, None)
+
+    def _arr_service_ready_for_redownload(self, service: str) -> bool:
+        config = load_arr_config() or {}
+        service_config = (config or {}).get(service) or {}
+        errors = validate_arr_service_config(service, service_config)
+        if errors:
+            for error in errors:
+                self.output.append(error)
+            if hasattr(self, "arr_settings_status_label"):
+                self.arr_settings_status_label.setText(" ".join(errors))
+            return False
+        return True
 
     def _current_scan_max_workers(self) -> int | None:
         if self.scan_workers_auto_checkbox.isChecked():
@@ -2266,6 +2888,7 @@ class MainWindow(QWidget):
                     "media_folder": media_folder,
                     "auto_workers": self.scan_workers_auto_checkbox.isChecked(),
                     "manual_workers": self.scan_workers_manual_spin.value(),
+                    "auto_fix_mode": self._current_auto_fix_mode(),
                 },
                 self.scan_path_settings_path,
             )
@@ -2540,19 +3163,19 @@ class MainWindow(QWidget):
             int(DEFAULT_SCAN_RULES_SETTINGS.get("min_file_size_bytes", 1_000_000))
         )
         self.scan_rules_check_subtitles.setChecked(
-            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_subtitles", True))
+            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_subtitles", False))
         )
         self.scan_rules_check_hdr.setChecked(
-            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_hdr", True))
+            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_hdr", False))
         )
         self.scan_rules_check_tenbit_h264.setChecked(
             bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_tenbit_h264", True))
         )
         self.scan_rules_check_multiple_audio.setChecked(
-            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_multiple_audio", True))
+            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_multiple_audio", False))
         )
         self.scan_rules_check_multiple_subtitle.setChecked(
-            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_multiple_subtitle", True))
+            bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_multiple_subtitle", False))
         )
         self.scan_rules_check_multiple_commentary.setChecked(
             bool(DEFAULT_SCAN_RULES_SETTINGS.get("check_multiple_commentary", True))

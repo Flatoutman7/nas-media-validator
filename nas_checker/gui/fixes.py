@@ -57,6 +57,7 @@ class FixAction:
     label: str
     fixable: bool
     status: str
+    auto_fix_eligible: bool = False
 
 
 def is_tv_episode_path(file_path: str) -> bool:
@@ -88,6 +89,7 @@ def classify_fix_action(file_path: str, issues: Any) -> FixAction:
             "Auto-fix with ffmpeg",
             True,
             "Ready",
+            True,
         )
 
     if issue_codes.intersection(MANUAL_REVIEW_CODES) or issue_codes:
@@ -103,4 +105,13 @@ def classify_fix_action(file_path: str, issues: Any) -> FixAction:
         "No automatic fix / manual review",
         False,
         "Manual review",
+    )
+
+
+def is_safe_auto_fix_action(action: FixAction | None) -> bool:
+    return bool(
+        action
+        and action.action_id == ACTION_FFMPEG
+        and action.fixable
+        and action.auto_fix_eligible
     )

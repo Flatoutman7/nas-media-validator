@@ -87,6 +87,19 @@ def test_scan_settings_filter_fields_keep_normal_height(tmp_path, monkeypatch):
     assert container_height >= 20
     assert container_height >= min(peer_heights) - 2
 
+    window._reset_scan_rules_settings_to_defaults()
+    assert window.scan_rules_containers_edit.text() == "mp4,mkv"
+    assert window.scan_rules_video_codecs_edit.text() == "hevc,h264"
+    assert window.scan_rules_audio_codecs_edit.text() == "aac,ac3,eac3"
+    assert window.scan_rules_min_size_spin.value() == 1_000_000
+    assert window.scan_rules_check_subtitles.isChecked() is False
+    assert window.scan_rules_check_hdr.isChecked() is False
+    assert window.scan_rules_check_tenbit_h264.isChecked() is True
+    assert window.scan_rules_check_multiple_audio.isChecked() is False
+    assert window.scan_rules_check_multiple_subtitle.isChecked() is False
+    assert window.scan_rules_check_multiple_commentary.isChecked() is True
+    assert window.scan_rules_check_wrong_resolution.isChecked() is True
+
     def rect_in_window(widget):
         return widget.geometry().translated(
             widget.parentWidget().mapTo(window, QPoint(0, 0))
