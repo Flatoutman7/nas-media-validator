@@ -197,6 +197,29 @@ def test_second_implausible_read_benchmark_keeps_previous_effective(
     assert loaded[MEASURED_READ_CONFIDENCE_KEY] == "low"
 
 
+def test_low_confidence_read_benchmark_without_previous_keeps_measured(
+    monkeypatch,
+):
+    monkeypatch.setattr("health.hardware.os.cpu_count", lambda: 16)
+    monkeypatch.setattr("health.hardware.detect_nvidia_gpu", lambda: False)
+    monkeypatch.setattr(
+        "health.hardware.get_storage_profile",
+        lambda _path: {
+            "drive_type": "remote",
+            "storage_class": "network",
+            "estimated_read_mb_s": 60,
+        },
+    )
+
+    evaluation = evaluate_read_benchmark_result("Z:/Media", 180.0, None, "low")
+
+    assert evaluation["raw_mb_s"] == 180.0
+    assert evaluation["effective_mb_s"] == 180.0
+    assert evaluation["confidence"] == "low"
+    assert evaluation["ignored"] is False
+    assert evaluation["benchmark_low_confidence"] is True
+
+
 def test_measure_read_throughput_reads_existing_media_files(tmp_path):
     media_file = tmp_path / "movie.mkv"
     media_file.write_bytes(b"a" * (2 * 1024 * 1024))
