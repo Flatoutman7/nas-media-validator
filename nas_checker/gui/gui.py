@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QListWidget,
     QListWidgetItem,
-updates/new-features
     QFileDialog,
     QCheckBox,
     QSpinBox,
@@ -26,10 +25,6 @@ updates/new-features
     QScrollArea,
     QSizePolicy,
     QAbstractItemView,
-=======
-    QCheckBox,
-    QGroupBox,
-main
 )
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QAction
@@ -641,7 +636,9 @@ class MainWindow(QWidget):
         self.net_track_group.setLayout(net_track_layout)
         health_layout.addWidget(self.net_track_group)
 
-        self.net_track_read_speed_chk.toggled.connect(self._apply_network_track_visibility)
+        self.net_track_read_speed_chk.toggled.connect(
+            self._apply_network_track_visibility
+        )
         self.net_track_latency_chk.toggled.connect(self._apply_network_track_visibility)
         self.net_track_throughput_chk.toggled.connect(
             self._apply_network_track_visibility
@@ -3463,7 +3460,7 @@ class MainWindow(QWidget):
         command = (
             f'schtasks /Create /TN "NAS Media Validator Scan" /TR '
             f'"\\"{python_exe}\\" \\"{main_script}\\" --path \\"{media_path}\\"" '
-            f"{schedule_args} /st 02:00 /F" 
+            f"{schedule_args} /st 02:00 /F"
         )
         QApplication.clipboard().setText(command)
         self.output.append("Task Scheduler command copied to clipboard:")
@@ -3636,12 +3633,13 @@ class MainWindow(QWidget):
             self.net_track_read_speed_chk.isChecked()
         )
         self.net_latency_value_label.setVisible(self.net_track_latency_chk.isChecked())
-        self.net_throughput_box.setVisible(
-            self.net_track_throughput_chk.isChecked()
-        )
+        self.net_throughput_box.setVisible(self.net_track_throughput_chk.isChecked())
 
     def _measure_network_performance(self) -> None:
-        if getattr(self, "net_measure_worker", None) and self.net_measure_worker.isRunning():
+        if (
+            getattr(self, "net_measure_worker", None)
+            and self.net_measure_worker.isRunning()
+        ):
             return
 
         self.net_measure_button.setEnabled(False)
@@ -3661,7 +3659,9 @@ class MainWindow(QWidget):
         self.net_measure_button.setEnabled(True)
 
         if not isinstance(result, dict):
-            self.net_measure_status_label.setText("Network performance measured (unknown format).")
+            self.net_measure_status_label.setText(
+                "Network performance measured (unknown format)."
+            )
             return
 
         self.net_last_network_result = result
@@ -3718,15 +3718,9 @@ class MainWindow(QWidget):
             cur_txt = "--" if cur is None else f"{float(cur):.0f}"
             avg_txt = "--" if avg is None else f"{float(avg):.0f}"
             peak_txt = "--" if peak is None else f"{float(peak):.0f}"
-            self.net_throughput_current_label.setText(
-                f"Current: {cur_txt} MB/s"
-            )
-            self.net_throughput_average_label.setText(
-                f"Average: {avg_txt} MB/s"
-            )
-            self.net_throughput_peak_label.setText(
-                f"Peak: {peak_txt} MB/s"
-            )
+            self.net_throughput_current_label.setText(f"Current: {cur_txt} MB/s")
+            self.net_throughput_average_label.setText(f"Average: {avg_txt} MB/s")
+            self.net_throughput_peak_label.setText(f"Peak: {peak_txt} MB/s")
 
     def _empty_library_stats_total(self):
         return {

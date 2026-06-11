@@ -4,7 +4,6 @@ Scans a NAS or local media library with **ffprobe**, flags Plex-oriented compati
 
 ## Prerequisites
 
-updates/new-features
 - Python 3.11+ (see `environment.yml` for conda setup)
 - **ffprobe** and **ffmpeg** on `PATH` (install [FFmpeg](https://ffmpeg.org/download.html))
 - Optional: NVIDIA GPU + drivers for NVENC auto-fix (falls back to `libx265` on CPU)
@@ -87,6 +86,7 @@ Issues are stored as structured `{code, message}` objects; legacy plain-text cac
 - Auto-fix with progress, cancel, and `.bak` backup before replace
 - Scan history and library-wide stats
 - NAS Health tab: OK%, schedule, overdue reminders, Task Scheduler command helper
+- Network Performance Monitor: latency plus read/throughput sampling
 - Cache hit rate shown in scan progress stats
 - Read-only media folder speed test for Auto worker tuning
 
@@ -108,45 +108,3 @@ pytest
 ```
 
 Tests mock ffprobe JSON and do not require PySide6 or real media files.
-=======
-## How to run
-
-CLI scan (default scan root is `Z:/`):
-
-```bash
-python main.py
-```
-
-GUI:
-
-```bash
-python main.py --gui
-```
-
-## Features
-
-- Scan History tab (persistent past scan results).
-- NAS Health dashboard tab:
-  - OK% progress
-  - Corrupted / Unreadable / Unrepairable counts
-  - Last Scan + Next Scan scheduling (Daily / Weekly / Custom date)
-- Incremental scanning cache (faster repeat scans by reusing per-file results when unchanged).
-- Network Performance Monitor (best-effort):
-  - Latency (ICMP when possible, SMB TCP connect fallback)
-  - Read speed + throughput measured by sampling a file under the scan root
-
-## Configuration
-
-- Default scan root is `Z:/` (see `nas_checker/scan/main.py` -> `MEDIA_FOLDER`).
-
-## Where data is stored
-
-- `scan_history.json` (repo root)
-  - scan history used by the “Scan History” and “NAS Health” tabs
-- `nas_checker/scan/scan_metadata.db`
-  - SQLite incremental scan cache (keyed by file path + `size` + `mtime_ns`)
-- `nas_checker/gui/health_settings.json`
-  - persisted “NAS Health” scheduling settings
-
-Currently set to my preferences, feel free to ask how to edit it for your own needs.
-main
