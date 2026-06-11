@@ -1,11 +1,5 @@
 import json
-import os
-import sys
 import time
-
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if repo_root not in sys.path:
-    sys.path.insert(0, repo_root)
 
 from health.scan_metadata_cache import ScanMetadataCache, canonicalize_path_key
 from nas_checker.scan.issues import make_issue

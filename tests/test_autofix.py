@@ -1,10 +1,3 @@
-import os
-import sys
-
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if repo_root not in sys.path:
-    sys.path.insert(0, repo_root)
-
 from nas_checker.media.autofix import build_ffmpeg_command
 from nas_checker.scan.issues import make_issue
 from nas_checker.scan.issues import (

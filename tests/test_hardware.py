@@ -1,10 +1,3 @@
-import os
-import sys
-
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if repo_root not in sys.path:
-    sys.path.insert(0, repo_root)
-
 from health.hardware import (
     evaluate_read_benchmark_result,
     get_scan_worker_recommendation,
@@ -183,9 +176,7 @@ def test_second_implausible_read_benchmark_keeps_previous_effective(
     )
     previous = load_scan_path_settings(str(settings_path))[EFFECTIVE_READ_MB_S_KEY]
 
-    evaluation = evaluate_read_benchmark_result(
-        "Z:/Media", 4129.0, previous, "normal"
-    )
+    evaluation = evaluate_read_benchmark_result("Z:/Media", 4129.0, previous, "normal")
     save_scan_path_settings(
         {
             "media_folder": "Z:/Media",
