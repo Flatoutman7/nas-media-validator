@@ -1,5 +1,11 @@
 import sys
 
+updates/new-features
+from nas_checker.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+=======
 
 def main() -> None:
     """
@@ -27,3 +33,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
+main

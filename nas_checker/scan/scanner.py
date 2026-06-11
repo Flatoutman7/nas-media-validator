@@ -1,6 +1,20 @@
 import os
 
-MEDIA_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".m4v")
+MEDIA_EXTENSIONS = (
+    ".avi",
+    ".flv",
+    ".iso",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ts",
+    ".vob",
+    ".webm",
+    ".wmv",
+)
 
 
 def scan_folder(path, resume_after=None):
@@ -19,7 +33,8 @@ def scan_folder(path, resume_after=None):
         should_skip_until_resume_marker = os.path.isfile(resume_after_norm)
 
     for root, dirs, filenames in os.walk(path):
-        for file in filenames:
+        dirs.sort()
+        for file in sorted(filenames):
             if not file.lower().endswith(MEDIA_EXTENSIONS):
                 continue
 

@@ -4,29 +4,36 @@ import threading
 import os
 import subprocess
 
-from nas_checker.media.autofix import build_ffmpeg_command
-from nas_checker.arr.arr_config import load_arr_config
+from nas_checker.media.autofix import backup_original_file, build_ffmpeg_command
+from nas_checker.arr.arr_config import load_arr_config, validate_arr_service_config
+from nas_checker.scan.issues import issue_message, normalize_issues
 from nas_checker.scan.rules import analyze_file
+from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
 from nas_checker.arr.sonarr_client import SonarrClient
 from nas_checker.arr.radarr_client import RadarrClient
+updates/new-features
+from health.hardware import measure_read_throughput
+=======
 from health.network_monitor import (
     measure_read_throughput_mb_s,
     measure_latency_ms,
     resolve_unc_host_from_windows_root,
 )
+main
 
 
 class ScanWorker(QThread):
 
-    progress = Signal(int, int, float, float)
+    progress = Signal(int, int, float, float, int, int)
     log = Signal(str)
     issue = Signal(str, str)
     finished = Signal(object)
 
-    def __init__(self, path, resume_after=None):
+    def __init__(self, path, resume_after=None, max_workers=None):
         super().__init__()
         self.path = path
         self.resume_after = resume_after
+        self.max_workers = max_workers
         self._stop_event = threading.Event()
 
     def request_stop(self):
@@ -35,8 +42,12 @@ class ScanWorker(QThread):
 
     def run(self):
 
-        def progress_update(current, total, speed, remaining):
-            self.progress.emit(current, total, speed, remaining)
+        def progress_update(
+            current, total, speed, remaining, cache_hits=0, cache_misses=0
+        ):
+            self.progress.emit(
+                current, total, speed, remaining, cache_hits, cache_misses
+            )
 
         def log_update(message):
             self.log.emit(message)
@@ -51,27 +62,100 @@ class ScanWorker(QThread):
             issue_callback=issue_update,
             resume_after=self.resume_after,
             stop_event=self._stop_event,
+            max_workers=self.max_workers,
         )
 
         self.finished.emit(payload)
 
 
+class ReadSpeedBenchmarkWorker(QThread):
+    progress = Signal(str)
+    finished = Signal(object)
+
+    def __init__(self, path, max_bytes=None, sample_count=None):
+        super().__init__()
+        self.path = path
+        self.max_bytes = max_bytes
+        self.sample_count = sample_count
+
+    def run(self):
+        self.progress.emit("Read speed test running...")
+        kwargs = {}
+        if self.max_bytes is not None:
+            kwargs["max_bytes"] = self.max_bytes
+        if self.sample_count is not None:
+            kwargs["sample_count"] = self.sample_count
+        result = measure_read_throughput(self.path, **kwargs)
+        self.finished.emit(result)
+
+
+class ArrConnectionTestWorker(QThread):
+    finished = Signal(str, bool)
+
+    def __init__(self, service: str, base_url: str, api_key: str):
+        super().__init__()
+        self.service = service
+        self.base_url = base_url
+        self.api_key = api_key
+
+    def run(self):
+        service_config = {
+            "enabled": True,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+        }
+        config_errors = validate_arr_service_config(self.service, service_config)
+        label = self.service.capitalize()
+        if config_errors:
+            self.finished.emit(" ".join(config_errors), False)
+            return
+
+        try:
+            if self.service == "sonarr":
+                client = SonarrClient(base_url=self.base_url, api_key=self.api_key)
+            else:
+                client = RadarrClient(base_url=self.base_url, api_key=self.api_key)
+            status = client._get("/api/v3/system/status")
+            version = ""
+            if isinstance(status, dict) and status.get("version"):
+                version = f" ({status['version']})"
+            self.finished.emit(f"{label} connection OK{version}.", True)
+        except Exception as exc:
+            self.finished.emit(f"{label} connection failed: {exc}", False)
+
+
 class AutoFixWorker(QThread):
     log = Signal(str)
+    progress = Signal(int, int)
     finished = Signal(str)
 
     def __init__(self, inputs: list[str], issues_by_input=None):
         super().__init__()
         self.inputs = inputs
         self.issues_by_input = issues_by_input or {}
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        self._stop_event.set()
 
     def run(self):
-        for input_path in self.inputs:
+        rules_settings = load_scan_rules_settings()
+        total = len(self.inputs)
+        for index, input_path in enumerate(self.inputs, start=1):
+            if self._stop_event.is_set():
+                self.log.emit("Auto-fix cancelled.")
+                break
+
+            self.progress.emit(index - 1, total)
+
             issues = self.issues_by_input.get(input_path)
             if issues is None:
-                # For folder mode, we re-analyze the file so the fix matches.
-                issues, _stats = analyze_file(input_path)
+                issues, _stats = analyze_file(input_path, rules_settings=rules_settings)
+            else:
+                if isinstance(issues, str):
+                    issues = [s.strip() for s in issues.split(",") if s.strip()]
 
+            issues = normalize_issues(issues)
             cmd, temp_output_path = build_ffmpeg_command(input_path, issues)
             if cmd is None or temp_output_path is None:
                 self.log.emit(f"Auto-fix: skipping (meets criteria): {input_path}")
@@ -90,19 +174,30 @@ class AutoFixWorker(QThread):
             )
             assert proc.stdout is not None
             for line in proc.stdout:
+                if self._stop_event.is_set():
+                    proc.terminate()
+                    self.log.emit("Auto-fix cancelled during ffmpeg.")
+                    break
                 self.log.emit(line.rstrip("\n"))
             proc.wait()
+
+            if self._stop_event.is_set():
+                try:
+                    if os.path.exists(temp_output_path):
+                        os.remove(temp_output_path)
+                except Exception:
+                    pass
+                break
 
             if proc.returncode != 0:
                 self.log.emit(f"Auto-fix failed (exit {proc.returncode}).")
             else:
-                # Failsafe: if the generated output has no audio, do not
-                # overwrite the original. This prevents "lost audio" cases.
                 try:
-                    _issues_out, stats_out = analyze_file(temp_output_path)
+                    _issues_out, stats_out = analyze_file(
+                        temp_output_path, rules_settings=rules_settings
+                    )
                     audio_found = bool(stats_out.get("audio_found"))
                 except Exception:
-                    # If we can't verify the output, do not overwrite the original.
                     audio_found = False
 
                 if not audio_found:
@@ -114,10 +209,13 @@ class AutoFixWorker(QThread):
                     except Exception:
                         pass
                 else:
-                    # Overwrite the original file only when ffmpeg succeeded
-                    # AND the output still contains audio.
+                    backup_path = backup_original_file(input_path)
+                    if backup_path:
+                        self.log.emit(f"Auto-fix backup: {backup_path}")
                     os.replace(temp_output_path, input_path)
                     self.log.emit(f"Auto-fix complete (replaced): {input_path}")
+
+            self.progress.emit(index, total)
 
         self.finished.emit("Auto-fix finished.")
 
@@ -140,15 +238,15 @@ class SonarrRedownloadWorker(QThread):
             self.finished.emit("Sonarr missing config.")
             return
 
-        base_url = sonarr_cfg.get("base_url")
-        api_key = sonarr_cfg.get("api_key")
-        if not base_url or not api_key:
-            self.log.emit(
-                "Sonarr config incomplete. `base_url` and `api_key` are required."
-            )
+        config_errors = validate_arr_service_config("sonarr", sonarr_cfg)
+        if config_errors:
+            for error in config_errors:
+                self.log.emit(error)
             self.finished.emit("Sonarr config incomplete.")
             return
 
+        base_url = sonarr_cfg.get("base_url")
+        api_key = sonarr_cfg.get("api_key")
         client = SonarrClient(base_url=base_url, api_key=api_key)
         self.log.emit(f"Sonarr: looking up series for '{self.series_term}'...")
         series_id = client.find_series_id(self.series_term)
@@ -183,15 +281,15 @@ class RadarrRedownloadWorker(QThread):
             self.finished.emit("Radarr missing config.")
             return
 
-        base_url = radarr_cfg.get("base_url")
-        api_key = radarr_cfg.get("api_key")
-        if not base_url or not api_key:
-            self.log.emit(
-                "Radarr config incomplete. `base_url` and `api_key` are required."
-            )
+        config_errors = validate_arr_service_config("radarr", radarr_cfg)
+        if config_errors:
+            for error in config_errors:
+                self.log.emit(error)
             self.finished.emit("Radarr config incomplete.")
             return
 
+        base_url = radarr_cfg.get("base_url")
+        api_key = radarr_cfg.get("api_key")
         client = RadarrClient(base_url=base_url, api_key=api_key)
         self.log.emit(f"Radarr: looking up movie for '{self.movie_term}'...")
         movie_id = client.find_movie_id(self.movie_term)

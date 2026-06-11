@@ -1,4 +1,3 @@
 """
 Sonarr/Radarr API helpers.
 """
-

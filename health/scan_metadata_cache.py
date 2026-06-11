@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from nas_checker.scan.issues import normalize_issues
 from nas_checker.scan.rules import analyze_file as analyze_file_uncached
+from nas_checker.scan.scan_rules_settings import (
+    compute_scan_rules_hash,
+    normalize_scan_rules_settings,
+)
 
 
 def canonicalize_path_key(path: str) -> str:
@@ -21,7 +26,9 @@ def canonicalize_path_key(path: str) -> str:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 @dataclass(frozen=True)
@@ -38,7 +45,11 @@ class ScanMetadataCache:
     - reuse cached (issues, stats) when unchanged
     """
 
-    def __init__(self, db_path: str):
+    def __init__(
+        self,
+        db_path: str,
+        rules_settings: dict[str, Any] | None = None,
+    ):
         self.db_path = db_path
         self._local = threading.local()  # sqlite connection per thread
 
@@ -48,6 +59,8 @@ class ScanMetadataCache:
         self.misses = 0
 
         self._write_lock = threading.Lock()
+        self.rules_settings = normalize_scan_rules_settings(rules_settings)
+        self.rules_hash = compute_scan_rules_hash(self.rules_settings)
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -60,8 +73,7 @@ class ScanMetadataCache:
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA temp_store=MEMORY;")
 
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 path_key TEXT PRIMARY KEY,
                 path TEXT NOT NULL,
@@ -72,8 +84,7 @@ class ScanMetadataCache:
                 last_scan_utc TEXT NOT NULL,
                 status TEXT NOT NULL
             )
-            """
-        )
+            """)
         conn.commit()
 
         self._local.conn = conn
@@ -88,8 +99,8 @@ class ScanMetadataCache:
 
     def _load_cached(
         self, file_path: str, meta: FileMeta
-    ) -> tuple[list[str], dict[str, Any]] | None:
-        path_key = canonicalize_path_key(file_path)
+    ) -> tuple[list[dict[str, str]], dict[str, Any]] | None:
+        path_key = canonicalize_path_key(file_path) + f"::{self.rules_hash}"
         conn = self._conn()
 
         cur = conn.execute(
@@ -106,24 +117,26 @@ class ScanMetadataCache:
 
         issues_json, stats_json = row
         try:
-            issues = json.loads(issues_json)
+            issues_raw = json.loads(issues_json)
             stats = json.loads(stats_json)
         except Exception:
             return None
 
-        if not isinstance(issues, list) or not isinstance(stats, dict):
+        if not isinstance(issues_raw, list) or not isinstance(stats, dict):
             return None
+
+        issues = normalize_issues(issues_raw)
         return issues, stats
 
     def _save_cached(
         self,
         file_path: str,
         meta: FileMeta,
-        issues: list[str],
+        issues: list[dict[str, str]],
         stats: dict[str, Any],
         status: str,
     ) -> None:
-        path_key = canonicalize_path_key(file_path)
+        path_key = canonicalize_path_key(file_path) + f"::{self.rules_hash}"
         conn = self._conn()
 
         record = (
@@ -131,7 +144,7 @@ class ScanMetadataCache:
             file_path,
             int(meta.size),
             int(meta.mtime_ns),
-            json.dumps(issues, ensure_ascii=False),
+            json.dumps(normalize_issues(issues), ensure_ascii=False),
             json.dumps(stats, ensure_ascii=False),
             _utc_now_iso(),
             status,
@@ -156,9 +169,18 @@ class ScanMetadataCache:
             )
             conn.commit()
 
+    def close(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+
     def analyze_file_cached(
         self, file_path: str
-    ) -> tuple[list[str], dict[str, Any], bool]:
+    ) -> tuple[list[dict[str, str]], dict[str, Any], bool]:
         """
         Returns (issues, stats, from_cache).
         """
@@ -168,7 +190,9 @@ class ScanMetadataCache:
             issues, stats = cached
             return issues, stats, True
 
-        issues, stats = analyze_file_uncached(file_path)
-        self._save_cached(file_path, meta, issues, stats, status="computed")
-        return issues, stats, False
-
+        issues, stats = analyze_file_uncached(
+            file_path, rules_settings=self.rules_settings
+        )
+        normalized = normalize_issues(issues)
+        self._save_cached(file_path, meta, normalized, stats, status="computed")
+        return normalized, stats, False

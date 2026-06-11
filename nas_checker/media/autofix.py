@@ -3,15 +3,37 @@ import re
 import subprocess
 from typing import Iterable
 
+from health.hardware import detect_nvidia_gpu
+from nas_checker.scan.issues import (
+    ISSUE_AUDIO_CODEC_NOT_ALLOWED,
+    ISSUE_CONTAINER_NOT_ALLOWED,
+    ISSUE_MULTIPLE_SUBTITLE,
+    ISSUE_NO_AUDIO,
+    ISSUE_PGS_SUBTITLES,
+    ISSUE_SUBTITLE_TRACK,
+    ISSUE_TENBIT_H264,
+    ISSUE_TEXT_SUBTITLES,
+    ISSUE_VIDEO_CODEC_NOT_ALLOWED,
+    ISSUE_WRONG_RESOLUTION,
+    collect_issue_codes,
+    issues_text_blob,
+    normalize_issues,
+)
+
 VIDEO_ENCODER_NVENC = "hevc_nvenc"
 
 
-def _parse_expected_height_from_wrong_resolution(issue: str):
+def _parse_expected_height_from_wrong_resolution(issues) -> int | None:
     """
     Parse `Wrong resolution: expected <Xp>, found <Yp>` and return X as int.
     """
 
-    m = re.search(r"Wrong resolution:\s*expected\s*(\d{3,4})p", issue, flags=re.I)
+    if isinstance(issues, str):
+        text = issues
+    else:
+        text = issues_text_blob(issues)
+
+    m = re.search(r"Wrong resolution:\s*expected\s*(\d{3,4})p", text, flags=re.I)
     if not m:
         return None
     try:
@@ -33,7 +55,7 @@ def _unique_output_path(output_path: str) -> str:
 
 
 def build_ffmpeg_command(
-    input_path: str, issues: Iterable[str] | str | None
+    input_path: str, issues: Iterable[str] | str | list | None
 ) -> tuple[list[str], str] | tuple[None, None]:
     """
     Build an ffmpeg command to fix a file based on detected issues.
@@ -43,13 +65,13 @@ def build_ffmpeg_command(
     """
 
     if isinstance(issues, str):
-        issues_text = issues.lower()
+        issue_list = normalize_issues([issues])
     else:
-        issues_text = ",".join([str(i).lower() for i in (issues or [])])
+        issue_list = normalize_issues(list(issues or []))
 
-    # Failsafe: if there is no audio, we can't "fix" it safely (and audio
-    # issues might already be caused by an earlier FileFlows step).
-    if "no audio stream found" in issues_text:
+    issue_codes = collect_issue_codes(issue_list)
+
+    if ISSUE_NO_AUDIO in issue_codes:
         return None, None
 
     input_path_norm = os.path.normpath(input_path)
@@ -57,35 +79,33 @@ def build_ffmpeg_command(
     base = os.path.splitext(os.path.basename(input_path_norm))[0]
     input_ext = os.path.splitext(input_path_norm)[1].lower() or ".mp4"
 
-    wants_mp4_container = "container is not mp4" in issues_text
+    wants_mp4_container = ISSUE_CONTAINER_NOT_ALLOWED in issue_codes
     target_ext = ".mp4" if wants_mp4_container else input_ext
 
     temp_output_path = _unique_output_path(
         os.path.join(folder, f"{base}_auto_fix_tmp{target_ext}")
     )
 
-    needs_hevc = "not hevc" in issues_text or "10bit h.264" in issues_text
-    needs_aac = "not aac" in issues_text
+    needs_hevc = (
+        ISSUE_VIDEO_CODEC_NOT_ALLOWED in issue_codes or ISSUE_TENBIT_H264 in issue_codes
+    )
+    needs_aac = ISSUE_AUDIO_CODEC_NOT_ALLOWED in issue_codes
 
-    # Subtitles: if anything indicates subtitles are "bad", we remove them.
-    remove_subtitles = any(
-        s in issues_text
-        for s in (
-            "subtitle track detected",
-            "pgs subtitles detected",
-            "text subtitles detected",
-            "pgs subtitles",
-        )
+    remove_subtitles = issue_codes.intersection(
+        {
+            ISSUE_SUBTITLE_TRACK,
+            ISSUE_PGS_SUBTITLES,
+            ISSUE_TEXT_SUBTITLES,
+        }
     )
 
-    expected_height = _parse_expected_height_from_wrong_resolution(issues_text)
+    expected_height = _parse_expected_height_from_wrong_resolution(issue_list)
 
-    # Only fix when we can confidently improve based on supported issue types.
     should_fix = any(
         [
             needs_hevc,
             needs_aac,
-            remove_subtitles,
+            bool(remove_subtitles),
             expected_height is not None,
             wants_mp4_container,
         ]
@@ -93,16 +113,14 @@ def build_ffmpeg_command(
     if not should_fix:
         return None, None
 
-    # Video codec selection
     if needs_hevc:
-        # NVIDIA hardware encoding
-        video_codec_args = ["-c:v", VIDEO_ENCODER_NVENC]
-        # A reasonable starting point; tweak later if you want.
-        video_codec_args += ["-preset", "p5"]
+        if detect_nvidia_gpu():
+            video_codec_args = ["-c:v", VIDEO_ENCODER_NVENC, "-preset", "p5"]
+        else:
+            video_codec_args = ["-c:v", "libx265", "-preset", "medium", "-crf", "23"]
     else:
         video_codec_args = ["-c:v", "copy"]
 
-    # Audio selection
     if needs_aac:
         audio_codec_args = ["-c:a", "aac", "-b:a", "192k"]
     else:
@@ -110,14 +128,10 @@ def build_ffmpeg_command(
 
     filter_args = []
     if expected_height is not None:
-        # Scale keeping aspect ratio; -2 forces even width.
         filter_args = ["-vf", f"scale=-2:{expected_height}"]
 
-    # Keep Plex-friendlier "first stream only" for reliability.
-    multiple_subtitle_issue = "multiple subtitle tracks detected" in issues_text
+    multiple_subtitle_issue = ISSUE_MULTIPLE_SUBTITLE in issue_codes
 
-    # Map video + first audio, optionally subtitles.
-    # -map 0:a:0? makes audio optional.
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -130,7 +144,6 @@ def build_ffmpeg_command(
         "0:a:0?",
     ]
 
-    # Subtitle mapping / removal
     if remove_subtitles:
         cmd.append("-sn")
     else:
@@ -138,7 +151,6 @@ def build_ffmpeg_command(
             cmd += ["-map", "0:s:0?"]
         else:
             cmd += ["-map", "0:s?"]
-        # Copy subtitles verbatim when we are not removing them.
         cmd += ["-c:s", "copy"]
 
     if filter_args:
@@ -147,7 +159,6 @@ def build_ffmpeg_command(
     cmd += video_codec_args
     cmd += audio_codec_args
 
-    # Container/muxer selection.
     if wants_mp4_container:
         cmd += ["-f", "mp4", "-movflags", "+faststart"]
 
@@ -177,3 +188,24 @@ def run_ffmpeg(cmd: list[str]):
         yield line.rstrip("\n")
     proc.wait()
     return proc.returncode, "\n".join(output_lines)
+
+
+def backup_original_file(input_path: str) -> str | None:
+    """Create a `.bak` backup of the original file before replacement."""
+
+    backup_path = input_path + ".bak"
+    if os.path.exists(backup_path):
+        base, ext = os.path.splitext(input_path)
+        for i in range(1, 1000):
+            candidate = f"{base}.bak{i}{ext}"
+            if not os.path.exists(candidate):
+                backup_path = candidate
+                break
+
+    try:
+        import shutil
+
+        shutil.copy2(input_path, backup_path)
+        return backup_path
+    except Exception:
+        return None

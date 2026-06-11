@@ -3,12 +3,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-
 DEFAULT_HISTORY_FILENAME = "scan_history.json"
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 class ScanHistory:
@@ -93,4 +94,3 @@ class ScanHistory:
                 json.dump(self._data, f, indent=2)
         except Exception:
             pass
-
