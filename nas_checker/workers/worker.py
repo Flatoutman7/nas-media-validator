@@ -11,7 +11,15 @@ from nas_checker.scan.rules import analyze_file
 from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
 from nas_checker.arr.sonarr_client import SonarrClient
 from nas_checker.arr.radarr_client import RadarrClient
+updates/new-features
 from health.hardware import measure_read_throughput
+=======
+from health.network_monitor import (
+    measure_read_throughput_mb_s,
+    measure_latency_ms,
+    resolve_unc_host_from_windows_root,
+)
+main
 
 
 class ScanWorker(QThread):
@@ -296,3 +304,50 @@ class RadarrRedownloadWorker(QThread):
         resp = client.missing_movie_search(movie_id)
         self.log.emit(f"Radarr response: {resp}")
         self.finished.emit("Radarr redownload triggered.")
+
+
+class NetworkMonitorWorker(QThread):
+    measured = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        media_root: str = "Z:/",
+        read_mb_per_iteration: int = 16,
+        iterations: int = 5,
+        min_file_bytes: int = 8 * 1024 * 1024,
+    ):
+        super().__init__()
+        self.media_root = media_root
+        self.read_mb_per_iteration = read_mb_per_iteration
+        self.iterations = iterations
+        self.min_file_bytes = min_file_bytes
+
+    def run(self):
+        try:
+            # Latency: ping the NAS host if we can infer it from the mapped drive.
+            host = resolve_unc_host_from_windows_root(self.media_root)
+            latency_info = measure_latency_ms(host) if host else {"latency_ms": None, "source": None}
+            latency_ms = latency_info.get("latency_ms")
+
+            # Read/throughput: read a small sample window from a file under the root.
+            throughput = measure_read_throughput_mb_s(
+                self.media_root,
+                read_mb_per_iteration=self.read_mb_per_iteration,
+                iterations=self.iterations,
+                min_file_bytes=self.min_file_bytes,
+            )
+
+            result = {
+                "host": host,
+                "latency_ms": latency_ms,
+                "latency_source": latency_info.get("source"),
+                "file_used": throughput.get("file_used"),
+                "read_speed_mb_s": throughput.get("current_mb_s"),
+                "throughput_current_mb_s": throughput.get("current_mb_s"),
+                "throughput_average_mb_s": throughput.get("average_mb_s"),
+                "throughput_peak_mb_s": throughput.get("peak_mb_s"),
+            }
+            self.measured.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
