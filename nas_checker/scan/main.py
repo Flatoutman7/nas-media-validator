@@ -313,8 +313,12 @@ def run_scan(
             "stats": stats_delta,
         }
     finally:
-        if not shutdown_called:
-            executor.shutdown(wait=True)
+        try:
+            if not shutdown_called:
+                executor.shutdown(wait=True)
+        finally:
+            if cache is not None:
+                cache.close()
 
 
 if __name__ == "__main__":

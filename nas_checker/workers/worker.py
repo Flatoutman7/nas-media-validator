@@ -11,15 +11,12 @@ from nas_checker.scan.rules import analyze_file
 from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
 from nas_checker.arr.sonarr_client import SonarrClient
 from nas_checker.arr.radarr_client import RadarrClient
-updates/new-features
 from health.hardware import measure_read_throughput
-=======
 from health.network_monitor import (
     measure_read_throughput_mb_s,
     measure_latency_ms,
     resolve_unc_host_from_windows_root,
 )
-main
 
 
 class ScanWorker(QThread):
@@ -327,7 +324,11 @@ class NetworkMonitorWorker(QThread):
         try:
             # Latency: ping the NAS host if we can infer it from the mapped drive.
             host = resolve_unc_host_from_windows_root(self.media_root)
-            latency_info = measure_latency_ms(host) if host else {"latency_ms": None, "source": None}
+            latency_info = (
+                measure_latency_ms(host)
+                if host
+                else {"latency_ms": None, "source": None}
+            )
             latency_ms = latency_info.get("latency_ms")
 
             # Read/throughput: read a small sample window from a file under the root.

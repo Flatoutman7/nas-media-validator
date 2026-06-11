@@ -436,9 +436,8 @@ def _measured_read_confidence(
     drive_type: str,
 ) -> tuple[float, str, str]:
     if (
-        (storage_class == "network" or drive_type == "remote")
-        and measured_read_mb_s > NETWORK_IMPLAUSIBLE_READ_MB_S
-    ):
+        storage_class == "network" or drive_type == "remote"
+    ) and measured_read_mb_s > NETWORK_IMPLAUSIBLE_READ_MB_S:
         return (
             NETWORK_CONSERVATIVE_READ_MB_S,
             "low",
@@ -472,8 +471,7 @@ def evaluate_read_benchmark_result(
     relative_implausible = (
         raw_mb_s is not None
         and previous_effective is not None
-        and raw_mb_s
-        > previous_effective * READ_BENCHMARK_PREVIOUS_MULTIPLIER_LIMIT
+        and raw_mb_s > previous_effective * READ_BENCHMARK_PREVIOUS_MULTIPLIER_LIMIT
     )
     low_confidence = (
         benchmark_low_confidence or network_implausible or relative_implausible
@@ -489,8 +487,6 @@ def evaluate_read_benchmark_result(
             "cached/implausible result ignored; "
             f"keeping previous effective speed {previous_effective:.0f} MB/s"
         )
-    elif benchmark_low_confidence:
-        effective_mb_s = previous_effective
     elif not effective_mb_s and not low_confidence:
         effective_mb_s = raw_mb_s
 
@@ -542,9 +538,7 @@ def get_scan_worker_recommendation(
             effective_measured_read_mb_s,
             measured_confidence,
             measured_warning,
-        ) = _measured_read_confidence(
-            measured_read_mb_s, storage_class, drive_type
-        )
+        ) = _measured_read_confidence(measured_read_mb_s, storage_class, drive_type)
         measured_read_mb_s = effective_measured_read_mb_s
         workers = _workers_for_measured_read_speed(
             cpu_count,
