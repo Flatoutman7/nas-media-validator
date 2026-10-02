@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QListWidget,
     QListWidgetItem,
+    QFileDialog,
 )
-from PySide6.QtCore import Qt, QDate
+from PySide6.QtCore import Qt, QDate, QSettings
 from PySide6.QtGui import QAction
 
 from datetime import datetime, timezone, timedelta
@@ -55,10 +56,23 @@ class MainWindow(QWidget):
         self.radarr_redownload_worker = None
         self.current_scan_started_at: datetime | None = None
         self.scan_history = ScanHistory()
+        self.app_settings = QSettings("NASChecker", "NAS Media Validator")
+        self.active_scan_path = None
 
         self.setWindowTitle("NAS Media Validator")
 
         main_layout = QVBoxLayout()
+        folder_layout = QHBoxLayout()
+        folder_layout.addWidget(QLabel("Media folder:"))
+        self.media_folder_edit = QLineEdit(
+            self.app_settings.value("media_folder", "Z:/", type=str)
+        )
+        self.media_folder_edit.setPlaceholderText("Select a folder or enter a NAS share path")
+        folder_layout.addWidget(self.media_folder_edit)
+        self.browse_folder_button = QPushButton("Browse...")
+        self.browse_folder_button.clicked.connect(self.choose_media_folder)
+        folder_layout.addWidget(self.browse_folder_button)
+        main_layout.addLayout(folder_layout)
         self.tabs = QTabWidget()
 
         issues_widget = QWidget()
@@ -420,19 +434,42 @@ class MainWindow(QWidget):
 
         subprocess.run(f'explorer /select,"{file_path}"')
 
+    def choose_media_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose media folder", self.media_folder_edit.text()
+        )
+        if folder:
+            self.media_folder_edit.setText(folder)
+
+    def _set_scan_controls(self, scanning):
+        self.start_button.setEnabled(not scanning)
+        self.new_scan_button.setEnabled(not scanning)
+        self.stop_button.setEnabled(scanning)
+        self.media_folder_edit.setEnabled(not scanning)
+        self.browse_folder_button.setEnabled(not scanning)
+
     def start_scan(self):
         if self.worker is not None and self.worker.isRunning():
             return
 
-        self.start_button.setEnabled(False)
-        self.new_scan_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        path = self.media_folder_edit.text().strip()
+        if not path:
+            self.scan_failed("Select a media folder before scanning.")
+            return
+        path = os.path.normpath(path)
+        if self.canonicalize_path(path) != self.canonicalize_path(self.active_scan_path):
+            self.resume_after = None
+        self.active_scan_path = path
+        self.app_settings.setValue("media_folder", path)
+        self._set_scan_controls(True)
         is_resume = self.resume_after is not None
         if not is_resume:
             self.current_scan_started_at = datetime.now(timezone.utc)
         if not is_resume:
             self.output.clear()
             self.table.setRowCount(0)
+            self.progress.setValue(0)
+            self.stats.setText("Files scanned: 0 | Issues: 0 | Speed: 0/s | ETA: --")
             self.library_stats_total = None
             self.library_stats_output.setPlainText(
                 "Library stats will be generated after the scan starts."
@@ -445,12 +482,13 @@ class MainWindow(QWidget):
         else:
             self.label.setText("Scanning NAS...")
 
-        self.worker = ScanWorker("Z:/", resume_after=self.resume_after)
+        self.worker = ScanWorker(path, resume_after=self.resume_after)
 
         self.worker.progress.connect(self.update_progress)
         self.worker.log.connect(self.add_log)
         self.worker.issue.connect(self.add_issue)
         self.worker.finished.connect(self.scan_finished)
+        self.worker.failed.connect(self.scan_failed)
 
         self.worker.start()
 
@@ -470,8 +508,6 @@ class MainWindow(QWidget):
         if self.worker:
             self.worker.request_stop()
         self.stop_button.setEnabled(False)
-        self.start_button.setEnabled(True)
-        self.new_scan_button.setEnabled(True)
         self.label.setText("Stopping...")
 
     def show_context_menu(self, position):
@@ -782,9 +818,15 @@ class MainWindow(QWidget):
         scrollbar = self.output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def scan_failed(self, message):
+        self._set_scan_controls(False)
+        self.resume_after = None
+        self.current_scan_started_at = None
+        self.label.setText("Scan failed — check the media folder and log")
+        self.output.append(message)
+
     def scan_finished(self, payload):
-        self.start_button.setEnabled(True)
-        self.new_scan_button.setEnabled(True)
+        self._set_scan_controls(False)
 
         bad_files = payload.get("bad_files", [])
         stats_delta = payload.get("stats", {})
@@ -806,6 +848,10 @@ class MainWindow(QWidget):
 
         self.resume_after = None
         self.label.setText("Scan Complete")
+        if not self.library_stats_total.get("scanned_files"):
+            self.label.setText("No supported media files found — check the selected folder")
+            self.output.append("Supported file types: .mp4, .mkv, .avi, .mov, .m4v")
+            return
 
         self.output.append(f"Files with issues: {len(bad_files)}")
         for file, issues in bad_files:
@@ -819,6 +865,7 @@ class MainWindow(QWidget):
         # so we snapshot the currently accumulated UI table instead.
         self._persist_completed_scan_to_history()
         self._render_nas_health_tab_latest()
+        self._render_drive_info_in_nas_health_tab()
 
     def load_scan_from_history(self, row: int, _column: int) -> None:
         if row < 0:
@@ -946,6 +993,7 @@ class MainWindow(QWidget):
             issues_total += len(entry.get("issues") or [])
 
         record = {
+            "media_folder": self.active_scan_path,
             "started_at": self.current_scan_started_at.isoformat().replace("+00:00", "Z"),
             "completed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "cancelled": False,
@@ -1192,17 +1240,17 @@ class MainWindow(QWidget):
             self.health_next_scan_label.setText("Next Scan: --")
 
     def _render_drive_info_in_nas_health_tab(self) -> None:
-        # Your scanner root is currently hardcoded as `Z:/`.
-        # If you add a path selector later, we can make this dynamic.
         try:
-            profile = get_storage_profile("Z:/")
+            path = self.active_scan_path or self.media_folder_edit.text().strip()
+            profile = get_storage_profile(path)
             drive_type = profile.get("drive_type") or "unknown"
-            drive_letter = profile.get("drive_letter") or "-"
+            drive_letter = profile.get("drive_letter")
             storage_class = profile.get("storage_class") or "unknown"
             estimated = profile.get("estimated_read_mb_s")
             disk_model = profile.get("disk_model") or ""
 
-            self.health_drive_label.setText(f"Drive: {drive_letter}: ({drive_type})")
+            location = f"{drive_letter}:" if drive_letter else path
+            self.health_drive_label.setText(f"Drive: {location} ({drive_type})")
             self.health_storage_label.setText(f"Storage: {storage_class}")
             if estimated:
                 # Match common vendor-spec units:

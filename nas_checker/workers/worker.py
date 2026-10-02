@@ -18,6 +18,7 @@ class ScanWorker(QThread):
     log = Signal(str)
     issue = Signal(str, str)
     finished = Signal(object)
+    failed = Signal(str)
 
     def __init__(self, path, resume_after=None):
         super().__init__()
@@ -40,16 +41,19 @@ class ScanWorker(QThread):
         def issue_update(file, issue):
             self.issue.emit(file, issue)
 
-        payload = scan_main.run_scan(
-            self.path,
-            progress_callback=progress_update,
-            log_callback=log_update,
-            issue_callback=issue_update,
-            resume_after=self.resume_after,
-            stop_event=self._stop_event,
-        )
-
-        self.finished.emit(payload)
+        try:
+            payload = scan_main.run_scan(
+                self.path,
+                progress_callback=progress_update,
+                log_callback=log_update,
+                issue_callback=issue_update,
+                resume_after=self.resume_after,
+                stop_event=self._stop_event,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            self.finished.emit(payload)
 
 
 class AutoFixWorker(QThread):

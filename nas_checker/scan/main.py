@@ -1,4 +1,4 @@
-from nas_checker.scan.scanner import scan_folder
+from nas_checker.scan.scanner import scan_folder, validate_scan_path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from nas_checker.output.report import save_report
 from health.hardware import recommend_scan_workers
@@ -53,6 +53,7 @@ def run_scan(
             log_callback(msg)
 
     log(f"Scanning: {path}")
+    validate_scan_path(path)
     if resume_after:
         log(f"Resuming after: {resume_after}")
     log("Checking files...")
