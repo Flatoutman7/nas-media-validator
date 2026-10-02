@@ -2027,6 +2027,8 @@ class MainWindow(QWidget):
             self.table.setRowCount(0)
             self.fixes_table.setRowCount(0)
             self._update_fixes_status_label()
+            # Clear the previous attempt even if this worker fails before its first progress signal.
+            self.update_progress(0, 1, 0, 0)
             self.library_stats_total = None
             self.library_stats_output.setPlainText(
                 "Library stats will be generated after the scan starts."
@@ -2334,7 +2336,8 @@ class MainWindow(QWidget):
         self._start_worker(self.radarr_redownload_worker)
 
     def auto_fix_finished(self, outputs_text: str):
-        """Report auto-fix output paths when the ffmpeg worker is done."""
+        """Report the terminal outcome when the ffmpeg worker is done."""
+        self.label.setText(outputs_text or "Auto-fix finished.")
         self.auto_fix_progress.setVisible(False)
         self.auto_fix_stop_button.setVisible(False)
         self.auto_fix_stop_button.setEnabled(True)
