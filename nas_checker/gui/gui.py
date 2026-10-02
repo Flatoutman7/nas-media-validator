@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QDate, QTimer
+from PySide6.QtCore import Qt, QDate, QTimer, QThread
 from PySide6.QtGui import QAction
 
 from datetime import date, datetime, timezone, timedelta
@@ -139,6 +139,7 @@ class MainWindow(QWidget):
     def __init__(self, media_folder: str | None = None):
 
         super().__init__()
+        self._closing = False
         self.media_folder = normalize_scan_path(media_folder or resolve_scan_path())
         self.worker = None
         self.resume_after = None
@@ -1765,7 +1766,7 @@ class MainWindow(QWidget):
         self.auto_fix_progress.setValue(0)
         self.auto_fix_stop_button.setVisible(True)
         self.auto_fix_stop_button.setEnabled(True)
-        self.auto_fix_worker.start()
+        self._start_worker(self.auto_fix_worker)
         return True
 
     def select_all_fixable(self) -> None:
@@ -1885,7 +1886,7 @@ class MainWindow(QWidget):
             self.sonarr_redownload_worker.finished.connect(
                 lambda msg, key=file_key: self._redownload_fix_finished(key, msg)
             )
-            self.sonarr_redownload_worker.start()
+            self._start_worker(self.sonarr_redownload_worker)
             return
 
         if action_id == ACTION_RADARR:
@@ -1900,7 +1901,7 @@ class MainWindow(QWidget):
             self.radarr_redownload_worker.finished.connect(
                 lambda msg, key=file_key: self._redownload_fix_finished(key, msg)
             )
-            self.radarr_redownload_worker.start()
+            self._start_worker(self.radarr_redownload_worker)
             return
 
         self._set_fix_status_by_key(file_key, "Skipped")
@@ -1966,6 +1967,40 @@ class MainWindow(QWidget):
 
         subprocess.run(f'explorer /select,"{file_path}"')
 
+    def _start_worker(self, worker):
+        if self._closing:
+            return
+        if isinstance(worker, QThread):
+            worker.setParent(self)
+        worker.start()
+        if isinstance(worker, QThread):
+            QTimer.singleShot(100, self._release_finished_workers)
+
+    def _release_finished_workers(self):
+        active = False
+        for worker in self.findChildren(QThread):
+            if worker.isFinished():
+                worker.setParent(None)
+            else:
+                active = True
+        if active:
+            QTimer.singleShot(100, self._release_finished_workers)
+
+    def closeEvent(self, event):
+        active = [worker for worker in self.findChildren(QThread) if worker.isRunning()]
+        if active:
+            self._closing = True
+            self.setEnabled(False)
+            self.label.setText("Stopping background work before closing...")
+            for worker in active:
+                request_stop = getattr(worker, "request_stop", None)
+                if request_stop is not None:
+                    request_stop()
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        event.accept()
+
     def start_scan(self):
         if self.worker is not None and self.worker.isRunning():
             return
@@ -1992,6 +2027,8 @@ class MainWindow(QWidget):
             self.table.setRowCount(0)
             self.fixes_table.setRowCount(0)
             self._update_fixes_status_label()
+            # Clear the previous attempt even if this worker fails before its first progress signal.
+            self.update_progress(0, 1, 0, 0)
             self.library_stats_total = None
             self.library_stats_output.setPlainText(
                 "Library stats will be generated after the scan starts."
@@ -2000,7 +2037,7 @@ class MainWindow(QWidget):
             self.library_stats_output.setPlainText("Resuming scan... updating stats.")
 
         if is_resume:
-            self.label.setText(f"Resuming scan...")
+            self.label.setText("Resuming scan...")
         else:
             self.label.setText("Scanning NAS...")
         self.scan_root_label.setText(f"Scan root: {scan_root}")
@@ -2029,10 +2066,12 @@ class MainWindow(QWidget):
         self.worker.issue.connect(self.add_issue)
         self.worker.finished.connect(self.scan_finished)
 
-        self.worker.start()
+        self._start_worker(self.worker)
 
     def start_fresh_scan(self):
         """Clear results and start a new scan from the beginning."""
+        if self.worker is not None and self.worker.isRunning():
+            return
         self.resume_after = None
         self.resume_scan_root = None
         self.output.clear()
@@ -2050,8 +2089,8 @@ class MainWindow(QWidget):
         if self.worker:
             self.worker.request_stop()
         self.stop_button.setEnabled(False)
-        self.start_button.setEnabled(True)
-        self.new_scan_button.setEnabled(True)
+        self.start_button.setEnabled(False)
+        self.new_scan_button.setEnabled(False)
         self.label.setText("Stopping...")
 
     def show_context_menu(self, position):
@@ -2146,7 +2185,7 @@ class MainWindow(QWidget):
         self.auto_fix_progress.setMaximum(1)
         self.auto_fix_progress.setValue(0)
         self.auto_fix_stop_button.setVisible(True)
-        self.auto_fix_worker.start()
+        self._start_worker(self.auto_fix_worker)
 
     def auto_fix_folder(self):
         """Run ffmpeg auto-fix across all media files in the selected file's folder."""
@@ -2186,7 +2225,7 @@ class MainWindow(QWidget):
         self.auto_fix_progress.setValue(0)
         self.auto_fix_stop_button.setVisible(True)
         self.auto_fix_stop_button.setEnabled(True)
-        self.auto_fix_worker.start()
+        self._start_worker(self.auto_fix_worker)
 
     def redownload_missing_sonarr(self):
         """
@@ -2242,7 +2281,7 @@ class MainWindow(QWidget):
         self.sonarr_redownload_worker.finished.connect(
             lambda msg: self.output.append(f"Sonarr: {msg}")
         )
-        self.sonarr_redownload_worker.start()
+        self._start_worker(self.sonarr_redownload_worker)
 
     def redownload_missing_radarr(self):
         """
@@ -2294,10 +2333,11 @@ class MainWindow(QWidget):
         self.radarr_redownload_worker.finished.connect(
             lambda msg: self.output.append(f"Radarr: {msg}")
         )
-        self.radarr_redownload_worker.start()
+        self._start_worker(self.radarr_redownload_worker)
 
     def auto_fix_finished(self, outputs_text: str):
-        """Report auto-fix output paths when the ffmpeg worker is done."""
+        """Report the terminal outcome when the ffmpeg worker is done."""
+        self.label.setText(outputs_text or "Auto-fix finished.")
         self.auto_fix_progress.setVisible(False)
         self.auto_fix_stop_button.setVisible(False)
         self.auto_fix_stop_button.setEnabled(True)
@@ -2343,7 +2383,6 @@ class MainWindow(QWidget):
             haystack = " ".join([file_text, media_title, issue_text]).lower()
             name_matches = True if not needle else needle in haystack
 
-            issue_text_lower = issue_text.lower()
             issue_codes = collect_issue_codes(issue_text)
             type_matches = (
                 True
@@ -2417,9 +2456,17 @@ class MainWindow(QWidget):
         scrollbar.setValue(scrollbar.maximum())
 
     def scan_finished(self, payload):
+        self.stop_button.setEnabled(False)
         self.start_button.setEnabled(True)
         self.new_scan_button.setEnabled(True)
         self._defer_fixes_refresh = False
+
+        if payload.get("error"):
+            self.resume_after = None
+            self.resume_scan_root = None
+            self.label.setText("Scan failed")
+            self.output.append(f"Scan failed: {payload['error']}")
+            return
 
         bad_files = payload.get("bad_files", [])
         stats_delta = payload.get("stats", {})
@@ -2482,6 +2529,8 @@ class MainWindow(QWidget):
         self._handle_auto_fix_after_scan()
 
     def _handle_auto_fix_after_scan(self) -> None:
+        if self._closing:
+            return
         mode = self._current_auto_fix_mode()
         if mode == AUTO_FIX_MODE_OFF:
             return
@@ -2907,7 +2956,7 @@ class MainWindow(QWidget):
                 ok,
             )
         )
-        worker.start()
+        self._start_worker(worker)
 
     def _arr_connection_test_finished(
         self,
@@ -3053,7 +3102,7 @@ class MainWindow(QWidget):
         self.read_speed_benchmark_worker.finished.connect(
             self._read_speed_test_finished
         )
-        self.read_speed_benchmark_worker.start()
+        self._start_worker(self.read_speed_benchmark_worker)
 
     def _read_speed_test_finished(self, result: dict) -> None:
         self.read_speed_test_button.setEnabled(True)
@@ -3607,7 +3656,6 @@ class MainWindow(QWidget):
             return
 
         schedule_type = self.health_schedule_type_combo.currentText()
-        anchor_date = self._active_health_anchor_date.date()
         today_utc = datetime.now(timezone.utc).date()
         next_date = self._compute_next_scan_date()
         if next_date is None:
@@ -3649,7 +3697,7 @@ class MainWindow(QWidget):
         self.net_measure_worker = NetworkMonitorWorker("Z:/")
         self.net_measure_worker.measured.connect(self._on_network_measure_done)
         self.net_measure_worker.error.connect(self._on_network_measure_error)
-        self.net_measure_worker.start()
+        self._start_worker(self.net_measure_worker)
 
     def _on_network_measure_error(self, msg: str) -> None:
         self.net_measure_button.setEnabled(True)

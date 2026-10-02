@@ -1,5 +1,6 @@
 import json
 import os
+import ntpath
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -20,9 +21,10 @@ def canonicalize_path_key(path: str) -> str:
     """
     if not path:
         return ""
-    normalized = os.path.normpath(path).strip()
-    normalized = normalized.replace("/", "\\")
-    return normalized.casefold()
+    path = os.fspath(path)
+    if os.name == "nt" or ntpath.splitdrive(path)[0]:
+        return ntpath.normpath(path).casefold()
+    return os.path.normpath(path)
 
 
 def _utc_now_iso() -> str:
@@ -53,10 +55,7 @@ class ScanMetadataCache:
         self.db_path = db_path
         self._local = threading.local()  # sqlite connection per thread
 
-        # Counts updated by the main thread (not worker threads),
-        # but kept here for convenience if needed later.
-        self.hits = 0
-        self.misses = 0
+        self._connections = []
 
         self._write_lock = threading.Lock()
         self.rules_settings = normalize_scan_rules_settings(rules_settings)
@@ -68,25 +67,35 @@ class ScanMetadataCache:
             return conn
 
         # Each worker thread gets its own connection (safe concurrency).
+        with self._write_lock:
+            return self._open_connection()
+
+    def _open_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA temp_store=MEMORY;")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS files (
-                path_key TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                size INTEGER NOT NULL,
-                mtime_ns INTEGER NOT NULL,
-                issues_json TEXT NOT NULL,
-                stats_json TEXT NOT NULL,
-                last_scan_utc TEXT NOT NULL,
-                status TEXT NOT NULL
-            )
-            """)
-        conn.commit()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS files (
+                    path_key TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    mtime_ns INTEGER NOT NULL,
+                    issues_json TEXT NOT NULL,
+                    stats_json TEXT NOT NULL,
+                    last_scan_utc TEXT NOT NULL,
+                    status TEXT NOT NULL
+                )
+                """)
+            conn.commit()
 
+        except sqlite3.Error:
+            conn.close()
+            raise
+
+        self._connections.append(conn)
         self._local.conn = conn
         return conn
 
@@ -123,6 +132,9 @@ class ScanMetadataCache:
             return None
 
         if not isinstance(issues_raw, list) or not isinstance(stats, dict):
+            return None
+
+        if stats.get("media_info_error"):
             return None
 
         issues = normalize_issues(issues_raw)
@@ -170,13 +182,12 @@ class ScanMetadataCache:
             conn.commit()
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            try:
+        # The caller must join scan workers before closing their connections.
+        with self._write_lock:
+            for conn in self._connections:
                 conn.close()
-            except Exception:
-                pass
-            self._local.conn = None
+            self._connections.clear()
+            self._local = threading.local()
 
     def analyze_file_cached(
         self, file_path: str
@@ -184,8 +195,11 @@ class ScanMetadataCache:
         """
         Returns (issues, stats, from_cache).
         """
-        meta = self._get_file_meta(file_path)
-        cached = self._load_cached(file_path, meta)
+        try:
+            meta = self._get_file_meta(file_path)
+            cached = self._load_cached(file_path, meta)
+        except (OSError, sqlite3.Error):
+            meta, cached = None, None
         if cached is not None:
             issues, stats = cached
             return issues, stats, True
@@ -194,5 +208,10 @@ class ScanMetadataCache:
             file_path, rules_settings=self.rules_settings
         )
         normalized = normalize_issues(issues)
-        self._save_cached(file_path, meta, normalized, stats, status="computed")
+        # Transient probe/share failures must be retried even if metadata is unchanged.
+        if meta is not None and not stats.get("media_info_error"):
+            try:
+                self._save_cached(file_path, meta, normalized, stats, status="computed")
+            except sqlite3.Error:
+                pass  # Cache persistence is optional; keep the scan result.
         return normalized, stats, False

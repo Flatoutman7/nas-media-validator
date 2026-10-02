@@ -1,6 +1,5 @@
 import os
 import re
-import subprocess
 from typing import Iterable
 
 from health.hardware import detect_nvidia_gpu
@@ -14,7 +13,6 @@ from nas_checker.scan.issues import (
     ISSUE_TENBIT_H264,
     ISSUE_TEXT_SUBTITLES,
     ISSUE_VIDEO_CODEC_NOT_ALLOWED,
-    ISSUE_WRONG_RESOLUTION,
     collect_issue_codes,
     issues_text_blob,
     normalize_issues,
@@ -51,7 +49,7 @@ def _unique_output_path(output_path: str) -> str:
         candidate = f"{base}_{i}{ext}"
         if not os.path.exists(candidate):
             return candidate
-    return output_path
+    raise FileExistsError(f"No free temporary output name for {output_path}")
 
 
 def build_ffmpeg_command(
@@ -108,12 +106,13 @@ def build_ffmpeg_command(
             bool(remove_subtitles),
             expected_height is not None,
             wants_mp4_container,
+            ISSUE_MULTIPLE_SUBTITLE in issue_codes,
         ]
     )
     if not should_fix:
         return None, None
 
-    if needs_hevc:
+    if needs_hevc or expected_height is not None:
         if detect_nvidia_gpu():
             video_codec_args = ["-c:v", VIDEO_ENCODER_NVENC, "-preset", "p5"]
         else:
@@ -167,29 +166,6 @@ def build_ffmpeg_command(
     return cmd, temp_output_path
 
 
-def run_ffmpeg(cmd: list[str]):
-    """
-    Run ffmpeg command and return (exit_code, combined_output_text).
-
-    Note: this is intended to be called from a background thread.
-    """
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    output_lines = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        output_lines.append(line)
-        yield line.rstrip("\n")
-    proc.wait()
-    return proc.returncode, "\n".join(output_lines)
-
-
 def backup_original_file(input_path: str) -> str | None:
     """Create a `.bak` backup of the original file before replacement."""
 
@@ -201,6 +177,8 @@ def backup_original_file(input_path: str) -> str | None:
             if not os.path.exists(candidate):
                 backup_path = candidate
                 break
+        else:
+            return None
 
     try:
         import shutil
