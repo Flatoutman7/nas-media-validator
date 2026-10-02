@@ -7,7 +7,7 @@ from typing import Any
 
 
 def resolve_unc_host_from_windows_root(root_path: str) -> str | None:
-    """
+    r"""
     Best-effort: for mapped drives like `Z:/`, try to find the UNC host
     (e.g. `\\server\share` -> `server`) using PowerShell.
 
@@ -260,4 +260,3 @@ def measure_read_throughput_mb_s(
         "average_mb_s": avg,
         "peak_mb_s": peak,
     }
-

@@ -1,4 +1,3 @@
-import json
 import time
 
 from health.scan_metadata_cache import ScanMetadataCache, canonicalize_path_key
@@ -77,3 +76,67 @@ def test_cache_invalidates_on_rules_hash_change(tmp_path, monkeypatch):
 
     assert from_cache is False
     assert calls["count"] == 2
+
+
+def test_close_closes_connections_created_by_workers(tmp_path):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    import pytest
+    cache = ScanMetadataCache(str(tmp_path / 'cache.db'))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        conn = pool.submit(cache._conn).result()
+    cache.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        conn.execute('SELECT 1')
+
+
+def test_transient_probe_error_is_not_cached(tmp_path, monkeypatch):
+    media = tmp_path / 'file.mp4'
+    media.write_bytes(b'test')
+    results = iter([([], {'media_info_error': True}), ([], {'audio_found': True})])
+    monkeypatch.setattr('health.scan_metadata_cache.analyze_file_uncached',
+                        lambda *a, **k: next(results))
+    cache = ScanMetadataCache(str(tmp_path / 'cache.db'))
+    try:
+        assert cache.analyze_file_cached(str(media))[2] is False
+        assert cache.analyze_file_cached(str(media))[2] is False
+        assert cache.analyze_file_cached(str(media))[2] is True
+    finally:
+        cache.close()
+
+
+def test_unavailable_cache_falls_back_to_analysis(tmp_path, monkeypatch):
+    media = tmp_path / 'file.mp4'
+    media.write_bytes(b'test')
+    monkeypatch.setattr('health.scan_metadata_cache.analyze_file_uncached',
+                        lambda *a, **k: ([], {'audio_found': True}))
+    cache = ScanMetadataCache(str(tmp_path / 'missing' / 'cache.db'))
+    try:
+        assert cache.analyze_file_cached(str(media)) == ([], {'audio_found': True}, False)
+    finally:
+        cache.close()
+
+
+def test_posix_cache_keys_preserve_case_and_spaces():
+    import os
+    if os.name != 'nt':
+        assert canonicalize_path_key('/media/Movie.mp4') != canonicalize_path_key('/media/movie.mp4')
+        assert canonicalize_path_key('/media/movie.mp4 ') != canonicalize_path_key('/media/movie.mp4')
+
+
+def test_unc_cache_keys_normalize_case_and_separators():
+    assert canonicalize_path_key(r'\\NAS\Media\Show.mkv') == canonicalize_path_key('//nas/media/show.mkv')
+
+
+def test_legacy_cached_probe_errors_are_retried(tmp_path, monkeypatch):
+    media = tmp_path / 'file.mp4'
+    media.write_bytes(b'test')
+    cache = ScanMetadataCache(str(tmp_path / 'cache.db'))
+    try:
+        cache._save_cached(str(media), cache._get_file_meta(str(media)), [],
+                           {'media_info_error': True}, 'computed')
+        monkeypatch.setattr('health.scan_metadata_cache.analyze_file_uncached',
+                            lambda *a, **k: ([], {'audio_found': True}))
+        assert cache.analyze_file_cached(str(media)) == ([], {'audio_found': True}, False)
+    finally:
+        cache.close()

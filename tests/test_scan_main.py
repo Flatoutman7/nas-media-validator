@@ -59,3 +59,58 @@ def test_run_scan_closes_cache_on_cancellation(monkeypatch):
     assert result["cancelled"] is True
     assert len(FakeScanMetadataCache.instances) == 1
     assert FakeScanMetadataCache.instances[0].closed is True
+
+
+def test_stop_during_final_drain_does_not_export(monkeypatch):
+    _patch_run_scan_dependencies(monkeypatch, ['a.mp4', 'b.mp4'])
+    stop = threading.Event()
+    reports = []
+    monkeypatch.setattr('nas_checker.scan.main.save_report', lambda *a, **k: reports.append(a))
+
+    def progress(*_args):
+        stop.set()
+
+    result = run_scan(path='Z:/Media', max_workers=1, stop_event=stop,
+                      progress_callback=progress)
+    assert result['cancelled'] is True
+    assert reports == []
+
+
+def test_cancellation_waits_for_active_cache_users(monkeypatch):
+    _patch_run_scan_dependencies(monkeypatch, ['a.mp4'])
+    stop = threading.Event()
+    active_finished = threading.Event()
+
+    def analyze(self, path):
+        stop.set()
+        assert not self.closed
+        active_finished.set()
+        return [], {}, False
+
+    def close(self):
+        assert active_finished.is_set()
+        self.closed = True
+
+    monkeypatch.setattr(FakeScanMetadataCache, 'analyze_file_cached', analyze)
+    monkeypatch.setattr(FakeScanMetadataCache, 'close', close)
+    result = run_scan(path='Z:/Media', max_workers=1, stop_event=stop)
+    assert result['cancelled'] is True
+
+
+def test_cancelled_out_of_order_results_are_not_counted_twice(monkeypatch):
+    _patch_run_scan_dependencies(monkeypatch, ['a.mp4', 'b.mp4'])
+    stop = threading.Event()
+    second_finished = threading.Event()
+
+    def analyze(self, path):
+        if path == 'a.mp4':
+            assert second_finished.wait(2)
+        else:
+            stop.set()
+            second_finished.set()
+        return [], {}, False
+
+    monkeypatch.setattr(FakeScanMetadataCache, 'analyze_file_cached', analyze)
+    result = run_scan(path='Z:/Media', max_workers=2, stop_event=stop)
+    expected = {None: 0, 'a.mp4': 1, 'b.mp4': 2}
+    assert result['stats']['scanned_files'] == expected[result['resume_after']]

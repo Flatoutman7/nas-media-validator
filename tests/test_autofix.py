@@ -5,7 +5,6 @@ from nas_checker.scan.issues import (
     ISSUE_CONTAINER_NOT_ALLOWED,
     ISSUE_NO_AUDIO,
     ISSUE_SUBTITLE_TRACK,
-    ISSUE_TENBIT_H264,
     ISSUE_VIDEO_CODEC_NOT_ALLOWED,
     ISSUE_WRONG_RESOLUTION,
 )
@@ -63,3 +62,27 @@ def test_build_ffmpeg_command_legacy_string_issues():
     assert cmd is not None
     assert out.endswith(".mp4")
     assert "-c:v" in cmd
+
+
+def test_resolution_fix_reencodes_video(monkeypatch):
+    monkeypatch.setattr('nas_checker.media.autofix.detect_nvidia_gpu', lambda: False)
+    cmd, _ = build_ffmpeg_command('movie.mp4', [make_issue(
+        ISSUE_WRONG_RESOLUTION, 'Wrong resolution: expected 1080p, found 720p')])
+    assert cmd[cmd.index('-c:v') + 1] == 'libx265'
+
+
+def test_multiple_subtitles_alone_is_fixable():
+    from nas_checker.scan.issues import ISSUE_MULTIPLE_SUBTITLE
+    cmd, _ = build_ffmpeg_command('movie.mkv', [make_issue(
+        ISSUE_MULTIPLE_SUBTITLE, 'Multiple subtitle tracks detected')])
+    assert '0:s:0?' in cmd
+    assert '0:s?' not in cmd
+
+
+def test_exhausted_temp_names_do_not_overwrite(monkeypatch):
+    import pytest
+    from nas_checker.media import autofix
+    monkeypatch.setattr(autofix.os.path, 'exists', lambda _: True)
+    with pytest.raises(FileExistsError):
+        autofix._unique_output_path('movie_auto_fix_tmp.mp4')
+    assert autofix.backup_original_file('movie.mp4') is None

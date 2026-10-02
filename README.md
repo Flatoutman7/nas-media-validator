@@ -107,4 +107,22 @@ schtasks /Create /TN "NAS Media Validator Scan" /TR "python main.py --path Z:/" 
 pytest
 ```
 
-Tests mock ffprobe JSON and do not require PySide6 or real media files.
+Tests mock ffprobe JSON and external services and use temporary files; no real
+media library or NAS is required. GUI/worker tests require PySide6 and otherwise
+skip. On headless Linux, run them with `QT_QPA_PLATFORM=offscreen pytest`.
+The cancellation test launches a short-lived Python child process, not ffmpeg.
+
+The CI blocking lint check is:
+
+```bash
+flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+```
+
+Scan cancellation stops queued work and waits for active probes before releasing
+the cache. Each ffprobe call has a 60-second timeout; operating-system filesystem
+calls on an unavailable share can still take longer. An unreadable root/subfolder
+fails the scan rather than producing a misleading successful report.
+
+Auto-fix preserves the original if output validation or backup fails. Container
+conversion changes the filename extension and refuses an existing destination;
+the original is retained as a backup. Failed temporary outputs are cleaned up.

@@ -210,3 +210,37 @@ def test_get_media_info_checks_returncode(monkeypatch):
 
     with pytest.raises(RuntimeError, match="ffprobe failed"):
         rules.get_media_info("file.mp4")
+
+
+def test_disappearing_file_is_reported_as_media_error(tmp_path):
+    from nas_checker.scan.rules import analyze_file
+    issues, stats = analyze_file(tmp_path / 'gone.mp4')
+    assert stats['media_info_error'] is True
+    assert issues[0]['code'] == 'media_info_error'
+
+
+def test_probe_timeout_is_reported(monkeypatch, tmp_path):
+    import subprocess
+    from nas_checker.scan.rules import analyze_file
+    media = tmp_path / 'movie.mp4'
+    media.write_bytes(b'test')
+
+    def timeout(*args, **kwargs):
+        assert kwargs['timeout'] == 60
+        raise subprocess.TimeoutExpired(args[0], 60)
+
+    monkeypatch.setattr(subprocess, 'run', timeout)
+    issues, stats = analyze_file(media)
+    assert stats['media_info_error'] is True
+    assert any(i['code'] == 'media_info_error' for i in issues)
+
+
+def test_malformed_probe_metadata_is_reported(monkeypatch, tmp_path):
+    from nas_checker.scan import rules
+    media = tmp_path / 'movie.mp4'
+    media.write_bytes(b'test')
+    for malformed in [None, [], {'streams': None}, {'streams': [None]}]:
+        monkeypatch.setattr(rules, 'get_media_info', lambda _: malformed)
+        issues, stats = rules.analyze_file(media)
+        assert stats['media_info_error'] is True
+        assert any(i['code'] == 'media_info_error' for i in issues)

@@ -125,3 +125,47 @@ def test_cancelled_scan_does_not_start_auto_fix(tmp_path, monkeypatch):
     assert window.label.text() == "Stopped — ready to resume"
 
     window.close()
+
+
+def test_scan_failure_restores_controls_without_history_or_auto_fix(tmp_path, monkeypatch):
+    _app, window = _create_window(tmp_path, monkeypatch)
+    window.start_button.setEnabled(False)
+    window.new_scan_button.setEnabled(False)
+    window.stop_button.setEnabled(True)
+    window.scan_finished({'error': 'Share unavailable'})
+    assert window.start_button.isEnabled()
+    assert window.new_scan_button.isEnabled()
+    assert not window.stop_button.isEnabled()
+    assert window.label.text() == 'Scan failed'
+    assert window.scan_history.scans() == []
+    window.close()
+
+
+def test_close_waits_for_background_thread_without_blocking_ui(tmp_path, monkeypatch):
+    from PySide6.QtCore import QThread
+    from PySide6.QtGui import QCloseEvent
+    import threading
+    _app, window = _create_window(tmp_path, monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+
+    class WaitingWorker(QThread):
+        def run(self):
+            started.set()
+            release.wait(5)
+
+        def request_stop(self):
+            release.set()
+
+    worker = WaitingWorker()
+    window._start_worker(worker)
+    assert started.wait(2)
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted()
+    assert window._closing
+    assert worker.wait(2000)
+    final_event = QCloseEvent()
+    window.closeEvent(final_event)
+    assert final_event.isAccepted()
+    window.close()

@@ -32,7 +32,11 @@ def scan_folder(path, resume_after=None):
         # Only skip if the marker file still exists; otherwise resume would yield nothing.
         should_skip_until_resume_marker = os.path.isfile(resume_after_norm)
 
-    for root, dirs, filenames in os.walk(path):
+    def walk_error(error):
+        # An unavailable share or unreadable subtree is not a successful empty scan.
+        raise error
+
+    for root, dirs, filenames in os.walk(path, onerror=walk_error):
         dirs.sort()
         for file in sorted(filenames):
             if not file.lower().endswith(MEDIA_EXTENSIONS):

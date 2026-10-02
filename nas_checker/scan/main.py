@@ -187,11 +187,8 @@ def run_scan(
 
     start_time = time.time()
 
-    cancelled = False
-    resume_after_next = resume_after
-
     index_to_file = []
-    completed_indices = set()
+    completed_results = {}
     next_resume_index = 0
 
     def process_file(file):
@@ -205,60 +202,53 @@ def run_scan(
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = set()
     future_to_index = {}
-    shutdown_called = False
+
+    def stopping():
+        return stop_event is not None and stop_event.is_set()
+
+    def collect_completed():
+        nonlocal futures, files_processed, next_resume_index
+        done, futures = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
+        for future in done:
+            idx = future_to_index.pop(future)
+            completed_results[idx] = future.result()
+        # Commit a contiguous prefix so resuming cannot count out-of-order
+        # completions twice. The submission bound also bounds this buffer.
+        while next_resume_index in completed_results:
+            file_path = index_to_file[next_resume_index]
+            issues, file_stats, from_cache = completed_results.pop(next_resume_index)
+            files_processed = _process_completed_file(
+                file_path, issues, file_stats, from_cache,
+                stats_delta=stats_delta, bad_files=bad_files,
+                files_processed=files_processed, total_discovered=total_discovered,
+                start_time=start_time, issue_callback=issue_callback,
+                progress_callback=progress_callback,
+            )
+            next_resume_index += 1
 
     try:
         for file in scan_folder(path, resume_after=resume_after):
-            if stop_event is not None and stop_event.is_set():
-                cancelled = True
+            if stopping():
                 break
-
             idx = len(index_to_file)
             index_to_file.append(file)
-
             future = executor.submit(process_file, file)
             futures.add(future)
             future_to_index[future] = idx
             total_discovered += 1
 
-            if len(futures) >= 64:
-                done, futures = wait(futures, return_when=FIRST_COMPLETED)
-                for future in done:
-                    idx = future_to_index.pop(future)
-                    file_path = index_to_file[idx]
-                    issues, file_stats, from_cache = future.result()
-                    files_processed = _process_completed_file(
-                        file_path,
-                        issues,
-                        file_stats,
-                        from_cache,
-                        stats_delta=stats_delta,
-                        bad_files=bad_files,
-                        files_processed=files_processed,
-                        total_discovered=total_discovered,
-                        start_time=start_time,
-                        issue_callback=issue_callback,
-                        progress_callback=progress_callback,
-                    )
-                    completed_indices.add(idx)
-                    while next_resume_index in completed_indices:
-                        next_resume_index += 1
+            while len(futures) + len(completed_results) >= 64 and not stopping():
+                collect_completed()
 
-                if stop_event is not None and stop_event.is_set():
-                    cancelled = True
-                    break
+        while futures and not stopping():
+            collect_completed()
 
+        cancelled = stopping()
         if cancelled:
             for future in futures:
                 future.cancel()
-            executor.shutdown(wait=False, cancel_futures=True)
-            shutdown_called = True
-
             last_idx = next_resume_index - 1
-            resume_after_next = (
-                index_to_file[last_idx] if last_idx >= 0 else resume_after
-            )
-
+            resume_after_next = index_to_file[last_idx] if last_idx >= 0 else resume_after
             log("Scan stopped.")
             return {
                 "bad_files": bad_files,
@@ -266,27 +256,6 @@ def run_scan(
                 "resume_after": resume_after_next,
                 "stats": stats_delta,
             }
-
-        for future in futures:
-            idx = future_to_index.pop(future)
-            file_path = index_to_file[idx]
-            issues, file_stats, from_cache = future.result()
-            files_processed = _process_completed_file(
-                file_path,
-                issues,
-                file_stats,
-                from_cache,
-                stats_delta=stats_delta,
-                bad_files=bad_files,
-                files_processed=files_processed,
-                total_discovered=total_discovered,
-                start_time=start_time,
-                issue_callback=issue_callback,
-                progress_callback=progress_callback,
-            )
-            completed_indices.add(idx)
-            while next_resume_index in completed_indices:
-                next_resume_index += 1
 
         log("")
         log("Scan complete")
@@ -314,16 +283,14 @@ def run_scan(
         }
     finally:
         try:
-            if not shutdown_called:
-                executor.shutdown(wait=True)
+            # Active probes must finish before their SQLite connections are closed.
+            executor.shutdown(wait=True, cancel_futures=True)
         finally:
             if cache is not None:
                 cache.close()
 
 
 if __name__ == "__main__":
-    import sys
-
     from nas_checker.cli import main as cli_main
 
     raise SystemExit(cli_main())

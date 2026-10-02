@@ -81,6 +81,7 @@ def get_media_info(file):
         encoding="utf-8",
         errors="ignore",
         creationflags=creationflags,
+        timeout=60,
     )
 
     if result.returncode != 0:
@@ -139,7 +140,11 @@ def analyze_file(file, rules_settings=None):
     }
 
     issues = []
-    issues.extend(check_min_file_size(file, rules_settings=rules_settings))
+    try:
+        issues.extend(check_min_file_size(file, rules_settings=rules_settings))
+    except OSError as exc:
+        stats["media_info_error"] = True
+        return [make_issue(ISSUE_MEDIA_INFO_ERROR, f"Could not read media info: {exc}")], stats
     if issues and issues[0].get("code") == ISSUE_FILE_SMALL:
         stats["min_file_size_issue"] = True
 
@@ -208,6 +213,10 @@ def analyze_file(file, rules_settings=None):
 
     try:
         info = get_media_info(file)
+        if not isinstance(info, dict) or not isinstance(info.get("streams", []), list):
+            raise ValueError("ffprobe returned invalid stream metadata")
+        if any(not isinstance(stream, dict) for stream in info.get("streams", [])):
+            raise ValueError("ffprobe returned invalid stream metadata")
     except Exception as exc:
         issues.append(
             make_issue(

@@ -45,3 +45,21 @@ def test_scan_folder_resume_after_handles_new_extensions(tmp_path):
     assert list(scan_folder(str(tmp_path), resume_after=str(first))) == [
         os.path.normpath(str(second))
     ]
+
+
+def test_missing_root_is_not_a_successful_empty_scan(tmp_path):
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        list(scan_folder(str(tmp_path / 'missing')))
+
+
+def test_unreadable_subtree_is_not_silently_skipped(monkeypatch):
+    import pytest
+
+    def walk(path, onerror):
+        onerror(PermissionError('share unavailable'))
+        return []
+
+    monkeypatch.setattr(os, 'walk', walk)
+    with pytest.raises(PermissionError):
+        list(scan_folder('Z:/Media'))
