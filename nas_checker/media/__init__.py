@@ -1,4 +1,3 @@
 """
 Media manipulation utilities.
 """
-

@@ -1,0 +1,6 @@
+{
+  "schedule_type": "Weekly",
+  "weekday": 6,
+  "custom_date": "2026-06-10",
+  "auto_start_when_overdue": false
+}

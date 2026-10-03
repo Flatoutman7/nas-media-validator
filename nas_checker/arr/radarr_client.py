@@ -12,7 +12,6 @@ class RadarrClient:
 
     def _get(self, path: str) -> Any:
         url = f"{self.base_url}{path}"
-        url = f"{url}?apikey={urllib.parse.quote(self.api_key)}"
 
         req = urllib.request.Request(url, method="GET")
         req.add_header("X-Api-Key", self.api_key)
@@ -21,7 +20,6 @@ class RadarrClient:
 
     def _post(self, path: str, payload: dict[str, Any]) -> Any:
         url = f"{self.base_url}{path}"
-        url = f"{url}?apikey={urllib.parse.quote(self.api_key)}"
 
         data = json.dumps(payload).encode("utf-8")
         headers = {

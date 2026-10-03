@@ -4,35 +4,33 @@ import os
 import pytest
 
 from nas_checker.scan.main import run_scan
-from nas_checker.scan.scanner import scan_folder, validate_scan_path
+from nas_checker.scan.scanner import scan_folder
 
 
 def test_missing_folder_fails_instead_of_returning_empty_results(tmp_path):
     missing = tmp_path / "disconnected-share"
-    with pytest.raises(OSError, match="Cannot read media folder"):
+    with pytest.raises(FileNotFoundError, match="disconnected-share"):
         list(scan_folder(str(missing)))
-    with pytest.raises(OSError, match="disconnected-share"):
-        validate_scan_path(str(missing))
 
 
 def test_failed_scan_preserves_previous_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("nas_checker.scan.main.run_preflight_checks", lambda **_: [])
     report = tmp_path / "bad_media_report.csv"
     report.write_text("previous results", encoding="utf-8")
-    with pytest.raises(OSError, match="Cannot read media folder"):
-        run_scan(str(tmp_path / "missing"), max_workers=1)
+    with pytest.raises(FileNotFoundError, match="missing"):
+        run_scan(str(tmp_path / "missing"), max_workers=1, use_cache=False)
     assert report.read_text(encoding="utf-8") == "previous results"
 
 
 def test_file_cannot_be_used_as_scan_folder(tmp_path):
     media_file = tmp_path / "movie.mp4"
     media_file.touch()
-    with pytest.raises(OSError, match="Cannot read media folder"):
-        validate_scan_path(str(media_file))
+    with pytest.raises(NotADirectoryError):
+        list(scan_folder(str(media_file)))
 
 
 def test_empty_folder_is_accessible(tmp_path):
-    validate_scan_path(str(tmp_path))
     assert list(scan_folder(str(tmp_path))) == []
 
 
