@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Any
+from nas_checker.runtime_paths import persistent_data_path
 
 DEFAULT_MEDIA_FOLDER = "Z:/"
 SCAN_PATH_ENV_VAR = "NAS_SCAN_PATH"
@@ -33,7 +34,7 @@ def normalize_scan_path(path: str | None) -> str:
 
 def get_default_scan_path_settings_path() -> str:
     gui_dir = os.path.dirname(os.path.dirname(__file__))
-    return os.path.join(gui_dir, "gui", "scan_path_settings.json")
+    return persistent_data_path(os.path.join(gui_dir, "gui", "scan_path_settings.json"))
 
 
 def normalize_auto_fix_mode(value: Any) -> str:

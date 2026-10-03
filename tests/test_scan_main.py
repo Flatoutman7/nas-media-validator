@@ -1,4 +1,5 @@
 import threading
+import sys
 
 from nas_checker.scan.main import run_scan
 
@@ -42,6 +43,22 @@ def test_run_scan_closes_cache_on_normal_completion(monkeypatch):
     assert result["cancelled"] is False
     assert len(FakeScanMetadataCache.instances) == 1
     assert FakeScanMetadataCache.instances[0].closed is True
+
+
+def test_packaged_default_report_ignores_launch_directory(tmp_path, monkeypatch):
+    _patch_run_scan_dependencies(monkeypatch, ["movie.mp4"])
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "release" / "NAS Checker.exe"))
+    monkeypatch.chdir(tmp_path)
+    reports = []
+    monkeypatch.setattr(
+        "nas_checker.scan.main.save_report",
+        lambda _files, filename: reports.append(filename),
+    )
+
+    run_scan(path="Z:/Media", max_workers=1)
+
+    assert reports == [str(tmp_path / "release" / "data" / "bad_media_report.csv")]
 
 
 def test_run_scan_closes_cache_on_cancellation(monkeypatch):

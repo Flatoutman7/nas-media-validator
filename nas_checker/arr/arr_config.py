@@ -3,12 +3,13 @@ import os
 import sys
 from typing import Any
 from urllib.parse import urlparse
+from nas_checker.runtime_paths import persistent_data_path
 
 ARR_SERVICES = ("sonarr", "radarr")
 
 
 def get_default_arr_config_path() -> str:
-    return os.path.join(os.path.dirname(__file__), "arr_config.json")
+    return persistent_data_path(os.path.join(os.path.dirname(__file__), "arr_config.json"))
 
 
 def normalize_arr_config(config: dict[str, Any] | None) -> dict[str, Any]:

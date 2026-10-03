@@ -11,6 +11,7 @@ from nas_checker.scan.scan_rules_settings import load_scan_rules_settings
 from nas_checker.scan.scanner import MEDIA_EXTENSIONS, scan_folder
 from health.hardware import recommend_scan_workers
 from health.scan_metadata_cache import ScanMetadataCache
+from nas_checker.runtime_paths import persistent_data_path
 
 
 def _empty_stats_delta():
@@ -177,7 +178,7 @@ def run_scan(
     cache = None
     if use_cache:
         cache = ScanMetadataCache(
-            db_path=os.path.join(os.path.dirname(__file__), "scan_metadata.db"),
+            db_path=persistent_data_path(os.path.join(os.path.dirname(__file__), "scan_metadata.db")),
             rules_settings=rules_settings,
         )
 
@@ -265,7 +266,7 @@ def run_scan(
         )
         log(f"Files with issues: {len(bad_files)}")
 
-        report_file = export_path or "bad_media_report.csv"
+        report_file = export_path or persistent_data_path("bad_media_report.csv")
         if export_path and export_path.lower().endswith(".json"):
             export_report_json(bad_files, export_path)
             log(f"Exported report: {export_path}")

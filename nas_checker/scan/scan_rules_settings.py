@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from typing import Any
+from nas_checker.runtime_paths import persistent_data_path
 
 DEFAULT_SCAN_RULES_SETTINGS: dict[str, Any] = {
     # Extensions without the leading dot.
@@ -109,7 +110,7 @@ def get_default_scan_rules_settings_path() -> str:
     # Note: rules also have defaults when this file doesn't exist.
     gui_dir = os.path.dirname(os.path.dirname(__file__))  # nas_checker/
     # We want nas_checker/gui/scan_rules_settings.json.
-    return os.path.join(gui_dir, "gui", "scan_rules_settings.json")
+    return persistent_data_path(os.path.join(gui_dir, "gui", "scan_rules_settings.json"))
 
 
 def load_scan_rules_settings(path: str | None = None) -> dict[str, Any]:
