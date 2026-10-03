@@ -83,6 +83,7 @@ from nas_checker.scan.scan_path_settings import (
     save_scan_path_settings,
 )
 from nas_checker.scan.preflight import format_preflight_error, run_preflight_checks
+from nas_checker.scan.scanner import MEDIA_EXTENSIONS
 from nas_checker.scan.issues import (
     ISSUE_AUDIO_CODEC_NOT_ALLOWED,
     ISSUE_CONTAINER_NOT_ALLOWED,
@@ -2015,6 +2016,8 @@ class MainWindow(QWidget):
         self.start_button.setEnabled(False)
         self.new_scan_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        self.scan_media_folder_edit.setEnabled(False)
+        self.scan_media_folder_browse_button.setEnabled(False)
         is_resume = self.resume_after is not None
         self._current_scan_is_resume = is_resume
         self._defer_fixes_refresh = True
@@ -2459,6 +2462,8 @@ class MainWindow(QWidget):
         self.stop_button.setEnabled(False)
         self.start_button.setEnabled(True)
         self.new_scan_button.setEnabled(True)
+        self.scan_media_folder_edit.setEnabled(True)
+        self.scan_media_folder_browse_button.setEnabled(True)
         self._defer_fixes_refresh = False
 
         if payload.get("error"):
@@ -2498,6 +2503,11 @@ class MainWindow(QWidget):
         self.resume_after = None
         self.resume_scan_root = None
         self.label.setText("Scan Complete")
+        if not self.library_stats_total.get("scanned_files"):
+            self.label.setText("No supported media files found — check the selected folder")
+            self.output.append("Supported file types: " + ", ".join(MEDIA_EXTENSIONS))
+            self.current_scan_started_at = None
+            return
 
         if self._current_scan_is_resume:
             history_bad_files = self._current_scan_bad_files_snapshot()
@@ -2772,6 +2782,7 @@ class MainWindow(QWidget):
             issues_total += len(entry.get("issues") or [])
 
         record = {
+            "media_folder": self.media_folder,
             "started_at": self.current_scan_started_at.isoformat().replace(
                 "+00:00", "Z"
             ),
