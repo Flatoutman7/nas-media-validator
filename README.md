@@ -52,6 +52,8 @@ Copy example templates and edit:
 GUI **Scan Settings** writes rules to `nas_checker/gui/scan_rules_settings.json` and path/worker preferences to `nas_checker/gui/scan_path_settings.json`.
 Use **Test Read Speed** there to run a read-only NAS throughput benchmark; Auto workers use the measured MB/s when available.
 
+The packaged Windows executable stores settings, scan history, the metadata cache, and the default CSV report in a `data` folder next to the executable. Keep this folder with the executable when moving or updating the app.
+
 ### Rule toggles (Scan Settings)
 
 - Default allowed containers: `mp4`, `mkv`

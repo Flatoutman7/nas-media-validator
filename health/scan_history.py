@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any
+from nas_checker.runtime_paths import persistent_data_path
 
 DEFAULT_HISTORY_FILENAME = "scan_history.json"
 
@@ -21,7 +22,7 @@ class ScanHistory:
         if history_path is None:
             # Keep history file at repo root for stable UX.
             repo_root = os.path.dirname(os.path.dirname(__file__))
-            history_path = os.path.join(repo_root, DEFAULT_HISTORY_FILENAME)
+            history_path = persistent_data_path(os.path.join(repo_root, DEFAULT_HISTORY_FILENAME))
         self.history_path = history_path
         self.max_entries = max_entries
 

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 import pytest
 
@@ -9,6 +10,25 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from health.scan_history import ScanHistory  # noqa: E402
 from nas_checker.gui import gui  # noqa: E402
 from nas_checker.scan.scan_path_settings import load_scan_path_settings  # noqa: E402
+
+check_overdue_scan_prompt = gui.MainWindow._check_overdue_scan_prompt
+
+
+def test_overdue_reminder_waits_for_visible_window(window, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(window, "_compute_next_scan_date", lambda: datetime.now(timezone.utc).date())
+    monkeypatch.setattr(gui.QMessageBox, "question", lambda *args: prompts.append(args) or gui.QMessageBox.No)
+    window.health_settings = {}
+    window._overdue_prompt_shown = False
+
+    check_overdue_scan_prompt(window)
+    assert prompts == []
+    assert not window._overdue_prompt_shown
+
+    window.show()
+    check_overdue_scan_prompt(window)
+    check_overdue_scan_prompt(window)
+    assert len(prompts) == 1
 
 
 @pytest.fixture

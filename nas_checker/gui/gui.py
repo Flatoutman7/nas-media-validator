@@ -114,6 +114,7 @@ from nas_checker.gui.fixes import (
     is_safe_auto_fix_action,
 )
 from nas_checker.output.report import save_report, save_report_json
+from nas_checker.runtime_paths import persistent_data_path
 
 MEDIA_SUBFOLDER_BASENAMES = {
     "show",
@@ -870,7 +871,7 @@ class MainWindow(QWidget):
                 format_preflight_error(preflight_errors),
             )
 
-        self._check_overdue_scan_prompt()
+        QTimer.singleShot(0, self._check_overdue_scan_prompt)
 
     def _create_fixes_tab(self) -> QScrollArea:
         fixes_scroll = QScrollArea()
@@ -2800,8 +2801,8 @@ class MainWindow(QWidget):
         self.current_scan_started_at = None
 
     def _init_health_settings_and_render(self) -> None:
-        self.health_settings_path = os.path.join(
-            os.path.dirname(__file__), "health_settings.json"
+        self.health_settings_path = persistent_data_path(
+            os.path.join(os.path.dirname(__file__), "health_settings.json")
         )
         self.health_settings = self._load_health_settings()
         self._active_health_record: dict | None = None
@@ -2819,8 +2820,8 @@ class MainWindow(QWidget):
         self._check_overdue_scan_prompt()
 
     def _init_scan_rules_settings_and_render(self) -> None:
-        self.scan_rules_settings_path = os.path.join(
-            os.path.dirname(__file__), "scan_rules_settings.json"
+        self.scan_rules_settings_path = persistent_data_path(
+            os.path.join(os.path.dirname(__file__), "scan_rules_settings.json")
         )
         self.scan_path_settings_path = get_default_scan_path_settings_path()
         self.scan_path_settings = load_scan_path_settings(self.scan_path_settings_path)
@@ -3481,6 +3482,8 @@ class MainWindow(QWidget):
         if self._overdue_prompt_shown:
             return
         if self.worker is not None and self.worker.isRunning():
+            return
+        if not self.isVisible():
             return
 
         self._overdue_prompt_shown = True
